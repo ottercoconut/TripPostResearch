@@ -1,0 +1,6 @@
+{
+  "membership_db": "../data/processed/research-cleaning-20260911-autodl-r2/cleaning-candidates.sqlite",
+  "source_db": "../data/processed/source-snapshots/topic-relevant-20260911.sqlite",
+  "candidate_manifest": "../data/processed/research-cleaning-20260911-autodl-r2/candidate-manifest.json",
+  "candidate_manifest_sha256": "4dc7eb9d7b2561c41d9ef1c362129b4832b03e4eae46e23855f04fd58ee6be23"
+}

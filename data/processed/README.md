@@ -24,7 +24,13 @@
 `cleaning_candidates`表保留全部19,255条：keep 10,914条、exclude 5,305条、
 manual_review 3,036条。配对`candidate-manifest.json`及当前指针绑定实际摘要，
 状态为`CANDIDATES_READY_AWAITING_HUMAN_REVIEW`。所有候选均为pending，不原位
-修改此候选快照；人工终审前不发布正式keep。本轮没有片段回填或内容标注。
+修改此候选快照；人工终审前不发布正式keep。本轮清洗没有片段回填或内容标注。
+
+2026-09-28另行发布`text-segments-20260928/`：对齐管理端当前10,914条keep，
+将191,844段存入`text-segments.sqlite`中的唯一`text_segments`表。源库与候选库
+保持只读；`source_post_id`关联源帖，批次及来源身份由配对manifest绑定。
+`current-text-segmentation.json`指向已验收的单表发布包及50篇随机抽查记录。
+完整来源核验、单表字段与调用方式见[模块接入说明](../../docs/protocols/客观文本切分模块接入.md)。
 
 生成入口为 `scripts/cleaning_snapshot_topic_relevant.py`；源库路径通过
 `--source-db` 显式传入，新输出由 `--output-db` 指定。只读单事务保证包含已提交WAL

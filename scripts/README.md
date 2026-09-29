@@ -16,6 +16,8 @@ cleaning_run_remote_research_round.py # 已完成AutoDL每批500条回传、验�
 cleaning_assemble_research_round.py # 完整验收后装配候选，不发布正式keep
 cleaning_complete_research_round.py # 同轮等待完成与后处理，不重启模型
 cleaning_freeze_research_data.py  # prepare/seal/verify：原始内容、媒体和完成候选封存
+text_segment_research.py         # 独立客观切分：只读管理端10,914条keep，写新验收运行包
+text_segment_database.py         # 切分结果单表导入、全量核验和固定种子随机抽查
 annotation_adjudicate.py          # 确认重复关系的泄漏分组
 annotation_build_reference.py     # 生成候选、冻结候补队列并封存最终700条参考集
 annotation_prepare_calibration.py # 研究内容共同校准主表转换
