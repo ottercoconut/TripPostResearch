@@ -2,7 +2,7 @@
 
 > **文档状态**：`CURRENT_ALIGNED`
 > **内部文档版本**：`v1.24`
-> **对齐版本**：编码表`v3.19.1`（索引状态已同步，不代表全部下游正文已对齐）
+> **对齐版本**：编码表`v3.20.0`（索引状态已同步，不代表全部下游正文已对齐）
 > **更新日期**：2026年9月25日
 
 ## 备忘事项唯一入口
@@ -27,12 +27,12 @@
 
 ## 当前理论文档
 
-下列文件以编码表v3.19.1为现行设计规范，V0为`DESIGN_REVISED / THRESHOLD_FROZEN / ROLE_VALIDATION_PENDING / EXECUTION_PAUSED`：保留KOL／KOC／HYBRID，粉丝参与候选身份定义；人数门槛已定（小红书5,000、知乎10,000），身份验证待完成，不发放正式身份任务、不生成金标、不训练角色模型。V1—V11保持自身范围和质量条件，内容编码不展示作者、粉丝或角色。旧数据、导出器和平台不视为已同步。
+下列文件以编码表v3.20.0为现行设计规范（v3.20.0只改文本单位与V5／V6主导评价记录，身份规则同v3.19.1），V0为`DESIGN_REVISED / THRESHOLD_FROZEN / ROLE_VALIDATION_PENDING / EXECUTION_PAUSED`：保留KOL／KOC／HYBRID，粉丝参与候选身份定义；人数门槛已定（小红书5,000、知乎10,000），身份验证待完成，不发放正式身份任务、不生成金标、不训练角色模型。V1—V11保持自身范围和质量条件，内容编码不展示作者、粉丝或角色。旧数据、导出器和平台不视为已同步。
 
 2026年8月31日曾决定只改进编码方法、不采纳整套研究设计简化；9月12日后，依赖KOL/KOC分类的假设和比较另受身份暂停决定覆盖。其他RQ、指标和AI协同候选仍须逐项依据研究问题与质量门处理，不能自动启用或删除。当前文本25篇共同校准与图片30张V7/V8操作试验各自推进，图片不等待V0；旧三周日程和60/120张视觉安排不作为本轮默认任务。
 
 - [`data-dictionary/编码表.md`](data-dictionary/编码表.md)：`CURRENT_CANONICAL`。
-- [`data-dictionary/编码簿_青岛旅游UGC编码框架.md`](data-dictionary/编码簿_青岛旅游UGC编码框架.md)：v3.19.1候选身份规则已对齐；平台和旧导出仍未迁移。
+- [`data-dictionary/编码簿_青岛旅游UGC编码框架.md`](data-dictionary/编码簿_青岛旅游UGC编码框架.md)：已对齐v3.20.0（身份规则同v3.19.1）；平台和旧导出仍未迁移。
 - [`data-dictionary/编码维度主观性评定报告.md`](data-dictionary/编码维度主观性评定报告.md)：V0相关解释`NEEDS_UPDATE`，主观性、层级关系与重叠风险正文保留原基线。
 - [`data-dictionary/编码表与BERT学习的对应关系.md`](data-dictionary/编码表与BERT学习的对应关系.md)：V0角色解释`NEEDS_UPDATE`；V3—V6逐字段学习映射不受本轮影响。
 - [`methods/BERT多头多标签编码框架设计说明.md`](methods/BERT多头多标签编码框架设计说明.md)：V0角色解释`NEEDS_UPDATE`；文本模型监督结构与冻结门不受本轮影响。
