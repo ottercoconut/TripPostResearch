@@ -46,6 +46,7 @@ tourism-ugc-study/
 ├── scripts/                         # 命令入口平铺，以领域前缀区分
 ├── src/tourism_ugc_study/
 │   ├── cleaning/                    # 数据清洗与增量调度
+│   ├── segmentation/                # 独立客观切分与只读研究语料适配
 │   ├── annotation/                  # 抽样、标注与仲裁
 │   └── models/
 │       ├── text/                    # 文本模型
@@ -69,7 +70,7 @@ README、LICENSE、`pyproject.toml` 等仓库级文件保留在根目录。
 
 ## 4. 代码、脚本、配置和测试
 
-- `src/tourism_ugc_study/` 只放可导入、可测试的核心逻辑。目前保留用户明确需要的 `cleaning/`、`annotation/`、`models/text/` 和 `models/vision/`。
+- `src/tourism_ugc_study/` 只放可导入、可测试的核心逻辑。目前保留用户明确需要的 `cleaning/`、`segmentation/`、`annotation/`、`models/text/` 和 `models/vision/`；`tests/segmentation/`随独立切分实现建立。
 - 新的源码模块首次出现时，再建立对应包；不要预建 `analysis/`、`evaluation/` 或 `utils/`。
 - `scripts/` 保持平铺，使用 `cleaning_*.py`、`annotation_*.py`、`text_*.py`、`vision_*.py` 等名称。脚本只解析参数并调用 `src/`。
 - `configs/` 保持平铺，使用相同领域前缀。只有同类配置明显增多后才分类。

@@ -13,6 +13,7 @@
 
 ## 当前数据与执行绑定
 
+- `text-segmentation-research.json`：客观切分独立模块的只读输入绑定，与管理端当前10,914条keep相同；配对候选库、正文快照和manifest SHA。使用方式见[模块接入说明](../docs/protocols/客观文本切分模块接入.md)，不改变清洗决策或人工终审状态。
 - `cleaning-research-round-autodl.yaml`：当前完成轮次`research-cleaning-20260911-autodl-r2`，种子20260911，17,853条模型输入、1,402条原人工证据、每批500条共36批；输入SHA、模型、规范化和历史证据均精确绑定。
 - `cleaning-inference-cuda.yaml`：本次CUDA执行身份，同帖视图batch=8；不改变冻结模型、精度、2048-token完整分块及0.31/0.96阈值，不与MPS缓存混用。
 - `cleaning-data-freeze-20260912.json`：原始内容/媒体归档、研究输入、候选、完整推理及环境证据的封存路径与SHA锚，不含机器绝对路径。完成身份由`governance/research-data-freezes.json`登记，规则见[冻结协议](../docs/protocols/研究数据冻结与校验.md)。
