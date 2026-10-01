@@ -10,7 +10,7 @@
 > 内部文档版本：`v3.20.0-segment-dominant.1`（本文件不独立定义或修改编码规则）
 > Excel执行模板：固定文件`data/annotations/templates/all-label-manual-coding.xlsx`，内部模板版本`all-label-manual-coding-v2.6`
 > V0执行边界：`role-pilot-v0.4.1-draft / THRESHOLD_FROZEN / ROLE_VALIDATION_PENDING / EXECUTION_PAUSED`；本轮只修文档，不改平台、不生成金标或训练模型。
-> V0本轮状态：专业背景充分不必要，低粉KOC规模路径、高粉专业性门及HYBRID组合按下文；旧导出器与工作簿不视为已同步。
+> V0本轮状态：以V0节2026年9月30日执行更新为准；旧专业性门及EA／CE角色矩阵不再执行，旧导出器与工作簿不视为已同步。
 
 > 校订日期：2026年9月28日
 > 案例地：山东省青岛市
@@ -94,6 +94,8 @@ V0—V11是分析类目/变量，不是“主题”。本研究不开展开放�
 ## 二、作者层与帖子级元数据
 
 ### V0 创作者画像（作者快照级，修订稿／待验证）
+
+> **2026年9月30日执行更新：** 当前身份试编码按[编码表V0执行补充](编码表.md#role-positioning-candidate)和[身份轨试编码操作协议](../protocols/身份轨试编码操作协议.md)执行“粉丝规模＋明确创作者定位”，规则ID为`role-positioning-20260930`。低粉走KOC规模路径，达到门槛且定位明确判KOL；定位未见或材料不足记UNK，机构／多人账号记NA。兼具型本轮不赋值。下文旧EA／CE矩阵及其角色路径为历史参考，不再执行；本次文档更新不代表任务已发放、平台已部署或独立验证完成。
 
 **状态：`DESIGN_REVISED / THRESHOLD_FROZEN / ROLE_VALIDATION_PENDING / EXECUTION_PAUSED`。** 本节落实2026年9月23日确认的研究操作规则及9月24日确认的粉丝人数门槛，规则ID为`role-pilot-v0.4.1-draft`。它替换旧“粉丝最后辅助、兼具者优先KOL、所有角色必须SC=1”的设计；数值门槛已冻结，但材料及身份规则验证尚未完成，不得据此发放正式身份任务、裁决金标、训练身份模型或开展角色比较。未开展的判断保持未测，不填成`UNK`。
 
