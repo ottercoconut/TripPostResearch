@@ -67,12 +67,13 @@ AutoDL-r2已完成17,853条纯预测，另承接1,402条同规范正文人工证
 
 ## 文本切分
 
-现行`objective-structure-0.5`已在独立`segmentation`模块中实现，旧发布结果为
+文本编码已按`embedding-semantic-20261011`决定采用embedding自然语义分段；具体模型、
+边界配置和正式发布仍待验收。`objective-structure-0.5`已在独立`segmentation`模块中实现，旧发布结果为
 10,914帖／191,844段，通过`source_post_id`关联原帖，TripPostAdmin已接入。
-旧算法与结果已存档；新的TextTiling语义路径处于开发验证阶段，尚未替换正式活动结果。
+旧算法与结果已存档；新的TextTiling语义工程路径处于开发验证阶段，尚未替换正式活动结果。
 两种算法共用`text_segments`七字段结构，新批次使用新的发布包与片段身份。
 
-- 当前进度、证据与下一步：[总备忘录B05](docs/planning/研究问题与待办总备忘录.md#b05固定编码单位与客观切分工程接入)。
+- 当前进度、证据与下一步：[总备忘录B05](docs/planning/研究问题与待办总备忘录.md#b05embedding自然语义分段与工程接入)。
 - 新语义路径的接口、短帖规则与验收：[适配与验证方案](docs/protocols/语义文本切分适配与验证方案.md)。
 - 现行客观路径、七字段存储与归档身份：[客观模块接入协议](docs/protocols/客观文本切分模块接入.md)。
 
