@@ -25,8 +25,8 @@ from .contracts import EmbeddingError, SemanticDecision, TextUnit
 from .embedding import QwenTokenCounter, identity_sha256
 from .embedding_cache import EmbeddingCache
 from .integrity import WHITE, validate
-from .semantic_boundaries import choose_boundaries
-from .semantic_config import SemanticConfig, SemanticSettings, parse_semantic_settings
+from .semantic_dispatch import choose_semantic_boundaries
+from .semantic_config import SemanticConfig, SemanticSettings, StructuredSemanticConfig, parse_semantic_settings
 from .semantic_development_input import FrozenDevelopmentInput
 from .semantic_evaluation import (validate_counter_settings, validate_development_run,
                                   validate_development_units)
@@ -103,7 +103,8 @@ def _select_configs(baseline: SemanticConfig, configs: tuple[SemanticConfig, ...
         raise ValueError("invalid_comparison_config_budget")
     ids = []
     for item in result:
-        if (item.window_tokens not in {32, 64, 128} or item.absolute_cohesion_threshold not in {0.45, 0.55, 0.65}
+        if (asdict(item).keys() != asdict(baseline).keys()
+                or item.window_tokens not in {32, 64, 128} or item.absolute_cohesion_threshold not in {0.45, 0.55, 0.65}
                 or any(value != asdict(baseline)[key] for key, value in asdict(item).items() if key not in _TUNABLE)):
             raise ValueError("comparison_fixed_parameter_changed")
         ids.append(identity_sha256(asdict(item)))
@@ -113,21 +114,53 @@ def _select_configs(baseline: SemanticConfig, configs: tuple[SemanticConfig, ...
 
 
 def _boundary_result(case: dict, vectors, config: SemanticConfig, counter) -> tuple[list[dict] | None, dict, float]:
-    """调用纯算法并保留明确逐帖失败，系统性 embedding 错误仍向上终止。"""
+    """保留旧重放的三项结果接口；新规则使用包含结构证据的完整计算结果。"""
+    segments, decision, elapsed, _ = _boundary_calculation(case, vectors, config, counter)
+    return segments, decision, elapsed
+
+
+def _boundary_calculation(case: dict, vectors, config: SemanticConfig, counter) -> tuple[list[dict] | None, dict, float, dict | None]:
+    """执行纯边界规则并保留独立结构证据；系统性embedding错误向上终止。
+
+    领域失败无部分片段或结构trace，行为与运行API一致。decision并入冻结
+    单元诊断，structure的initial_decision仍保持纯评分层原始身份。
+    """
     started = time.monotonic()
+    structure = None
     try:
-        segments, decision = choose_boundaries(case["source_text"], tuple(TextUnit(**unit) for unit in case["units"]),
-                                              vectors, config, counter)
+        calculated = choose_semantic_boundaries(case["source_text"], tuple(TextUnit(**unit) for unit in case["units"]),
+                                               vectors, config, counter)
+        segments, decision = calculated.segments, calculated.decision
         records = [asdict(segment) for segment in segments]
         validate(case["source_text"], records)
+        if calculated.structure_trace is not None:
+            structure = json.loads(canonical_json(asdict(calculated.structure_trace)))
     except EmbeddingError:
         raise
     except ValueError as exc:
         records = None
+        structure = None
         decision = SemanticDecision("failed", (str(exc),), (), (), ())
     else:
         decision = replace(decision, reason_codes=tuple(dict.fromkeys((*case["diagnostics"], *decision.reason_codes))))
-    return records, json.loads(canonical_json(asdict(decision))), time.monotonic() - started
+    return records, json.loads(canonical_json(asdict(decision))), time.monotonic() - started, structure
+
+
+def _structure_replay(original: object, replayed: dict | None) -> dict:
+    """复验0.2结构证据，不允许重算外层SHA掩盖缺失或伪造的解释。
+
+    只有初始决策中的两种评分适用既有末位容差；结构跨度、原因、策略、
+    超限退让及其token数均要求严格类型和值一致。失败路径两侧都须为None。
+    """
+    if original is None and replayed is None:
+        return {"structure_exact": True}
+    if (type(original) is not dict or type(replayed) is not dict
+            or original.keys() != replayed.keys() or "initial_decision" not in replayed
+            or not all(_strict_json_equal(original[key], replayed[key])
+                       for key in replayed if key != "initial_decision")):
+        raise ValueError("comparison_structure_reproduction_failed")
+    initial = _baseline_decision_replay(original["initial_decision"], replayed["initial_decision"])
+    return {"structure_exact": initial["decision_exact"], "initial_decision_replay": initial}
 
 
 def _case_record(case: dict, segments: list[dict] | None, decision: dict, *, config_id: str,
@@ -202,11 +235,16 @@ def compare_semantic_configs(source: ResearchInput, members: Path, run: Path, ou
         vector_hash = None if vectors is None else hashlib.sha256(vectors.astype("<f4").tobytes(order="C")).hexdigest()
         if vector_hash != trace["summary"].get("vector_content_sha256"):
             raise ValueError("comparison_run_vector_digest_mismatch")
-        segments, decision, _ = _boundary_result(case, vectors, settings.algorithm, counter)
+        structure_evidence = {}
+        if isinstance(settings.algorithm, StructuredSemanticConfig):
+            segments, decision, _, structure = _boundary_calculation(case, vectors, settings.algorithm, counter)
+            structure_evidence = _structure_replay(trace.get("structure"), structure)
+        else:
+            segments, decision, _ = _boundary_result(case, vectors, settings.algorithm, counter)
         if not _strict_json_equal(segments, record["text_segments"]):
             raise ValueError("comparison_baseline_reproduction_failed")
         replay_rows.append({"source_post_id": case["source_post_id"],
-                            **_baseline_decision_replay(trace["decision"], decision)})
+                            **_baseline_decision_replay(trace["decision"], decision), **structure_evidence})
         original = record["semantic_diagnostics"]
         counts = {"unit_count": len(units), "candidate_gap_count": max(0, len(units) - 1),
                   "embedded_unit_count": len(units) if len(units) >= 2 else 0,
@@ -222,6 +260,8 @@ def compare_semantic_configs(source: ResearchInput, members: Path, run: Path, ou
             elapsed=record.get("boundary_seconds"), counter=counter, targeted=targeted))
         # trace计时覆盖候选、向量与边界；不能挪作纯边界耗时。
         baseline_rows[-1]["processing_seconds"] = trace.get("processing_seconds")
+        if isinstance(settings.algorithm, StructuredSemanticConfig) and trace.get("structure") is not None:
+            baseline_rows[-1]["structure"] = trace["structure"]
     if any(sum(row[key] for row in baseline_rows) != manifest["counts"][key]
            for key in ("embedded_unit_count", "cache_hit_count", "model_call_count")):
         raise ValueError("comparison_run_aggregate_counts_mismatch")
@@ -245,12 +285,18 @@ def compare_semantic_configs(source: ResearchInput, members: Path, run: Path, ou
             rows = []
             for case in frozen.cases:
                 vectors = vectors_by_post[case["source_post_id"]]
-                segments, decision, elapsed = _boundary_result(case, vectors, config, counter)
+                structure = None
+                if isinstance(config, StructuredSemanticConfig):
+                    segments, decision, elapsed, structure = _boundary_calculation(case, vectors, config, counter)
+                else:
+                    segments, decision, elapsed = _boundary_result(case, vectors, config, counter)
                 vector_hash = None if vectors is None else hashlib.sha256(vectors.astype("<f4").tobytes(order="C")).hexdigest()
                 rows.append(_case_record(case, segments, decision, config_id=spec["config_id"],
                     model_hash=manifest["model_identity_sha256"], vector_hash=vector_hash,
                     cache_hits=len(case["units"]) if vectors is not None else 0, model_calls=0,
                     elapsed=elapsed, counter=counter, targeted=targeted))
+                if structure is not None:
+                    rows[-1]["structure"] = structure
             for row, baseline in zip(rows, baseline_rows, strict=True):
                 row.update({"baseline_config_id": baseline_config_id, "baseline_segments": baseline["segments"],
                             "baseline_boundaries": baseline["new_boundaries"], "baseline_decision": baseline["decision"]})

@@ -11,9 +11,8 @@ from .engine import IMPLEMENTATION_VERSION, RULE_VERSION
 from .integrity import validate
 from .projection import PROJECTION_ID, project_structured_text
 from .semantic_config import (
-    EmbeddingConfig, SemanticConfig, parse_semantic_settings, validate_identity_settings,
-    IMPLEMENTATION_VERSION as SEMANTIC_IMPLEMENTATION_VERSION,
-    RULE_VERSION as SEMANTIC_RULE_VERSION, RUN_KIND as SEMANTIC_RUN_KIND,
+    EmbeddingConfig, parse_algorithm_config, parse_semantic_settings, validate_identity_settings,
+    validate_semantic_rule_identity, RUN_KIND as SEMANTIC_RUN_KIND,
 )
 from .source import ResearchPost, file_sha256
 
@@ -37,11 +36,12 @@ def _validate_semantic_identity(manifest: dict) -> None:
     config = manifest.get("config")
     if not isinstance(config, dict) or set(config) != {"algorithm", "embedding"}:
         raise ValueError("语义运行配置字段非法")
-    for name, cls in (("algorithm", SemanticConfig), ("embedding", EmbeddingConfig)):
-        raw = config[name]
-        if not isinstance(raw, dict) or set(raw) != set(cls.__dataclass_fields__):
-            raise ValueError("语义运行配置必须完整保存所有字段")
+    raw_embedding = config["embedding"]
+    if (not isinstance(raw_embedding, dict)
+            or set(raw_embedding) != set(EmbeddingConfig.__dataclass_fields__)):
+        raise ValueError("语义运行配置必须完整保存所有字段")
     try:
+        parse_algorithm_config(config["algorithm"], require_complete=True)
         settings = parse_semantic_settings(config)
     except (TypeError, ValueError):
         raise ValueError("语义运行配置值非法") from None
@@ -76,8 +76,11 @@ def validate_run_manifest(manifest: dict) -> None:
     if not isinstance(manifest, dict):
         raise ValueError("切分运行清单必须为对象")
     kind = manifest.get("artifact_kind")
-    versions = {"objective-text-segmentation-run": (RULE_VERSION, IMPLEMENTATION_VERSION),
-                SEMANTIC_RUN_KIND: (SEMANTIC_RULE_VERSION, SEMANTIC_IMPLEMENTATION_VERSION)}
+    # 每个语义配置显式绑定其登记配对；不能把8B型号当作新算法版本。
+    versions = {"objective-text-segmentation-run": (RULE_VERSION, IMPLEMENTATION_VERSION)}
+    if kind == SEMANTIC_RUN_KIND:
+        validate_semantic_rule_identity(manifest)
+        versions[kind] = (manifest["rule_version"], manifest["implementation_version"])
     counts = manifest.get("counts")
     if (kind not in versions or not isinstance(counts, dict)
             or manifest.get("status") != "completed" or type(counts.get("failed_count")) is not int

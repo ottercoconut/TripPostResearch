@@ -15,6 +15,8 @@ import re
 
 RULE_VERSION = "semantic-depth-ugc-0.1"
 IMPLEMENTATION_VERSION = "semantic-depth-ugc-0.1-original-1"
+STRUCTURED_RULE_VERSION = "semantic-depth-ugc-0.2"
+STRUCTURED_IMPLEMENTATION_VERSION = "semantic-depth-ugc-0.2-structure-global-1"
 RUN_KIND = "semantic-text-segmentation-run"
 
 
@@ -24,10 +26,20 @@ def validate_semantic_rule_identity(manifest: dict) -> None:
     本门不检查开发／全量范围，也不打开文件或加载模型；开发运行核验及跨模型
     汇总均可复用。缺失、未知或错配的身份抛 ValueError，不能静默解释为当前规则。
     """
-    if (not isinstance(manifest, dict)
-            or (manifest.get("rule_version"), manifest.get("implementation_version"))
-            != (RULE_VERSION, IMPLEMENTATION_VERSION)):
+    registered = ((RULE_VERSION, IMPLEMENTATION_VERSION),
+                  (STRUCTURED_RULE_VERSION, STRUCTURED_IMPLEMENTATION_VERSION))
+    if not isinstance(manifest, dict):
         raise ValueError("semantic_rule_identity_mismatch")
+    identity = (manifest.get("rule_version"), manifest.get("implementation_version"))
+    if identity not in registered:
+        raise ValueError("semantic_rule_identity_mismatch")
+    if "config" in manifest:
+        try:
+            configured = semantic_rule_identity(parse_semantic_settings(manifest["config"]).algorithm)
+        except (TypeError, ValueError):
+            raise ValueError("semantic_rule_identity_mismatch") from None
+        if configured != identity:
+            raise ValueError("semantic_rule_identity_mismatch")
 
 
 @dataclass(frozen=True)
@@ -66,6 +78,65 @@ class SemanticConfig:
             raise ValueError("unit_limit_exceeds_segment_limit")
         if type(self.smoothing) is not int or self.smoothing != 0:
             raise ValueError("smoothing_not_supported")
+
+
+@dataclass(frozen=True)
+class StructuredSemanticConfig(SemanticConfig):
+    """显式启用0.2开发规则；不向旧配置增加字段或改变历史指纹。
+
+    继承原有评分和长度参数，结构证据与分区策略另行进入配置摘要。
+    context/global仅在调用者选择本类或声明0.2时成为默认值，不能据模型
+    大小或缺失字段把历史0.1配置升级。登记算法身份不等于科研质量已通过。
+    """
+
+    rule_version: str = STRUCTURED_RULE_VERSION
+    structure_mode: str = "context"
+    length_strategy: str = "global"
+
+    def __post_init__(self) -> None:
+        """复用原参数约束，另拒绝未知身份与无法重放的结构／长度策略。"""
+        super().__post_init__()
+        if self.rule_version != STRUCTURED_RULE_VERSION:
+            raise ValueError("unknown_semantic_rule_version")
+        if self.structure_mode not in ("sentence_only", "structure", "blocks", "context"):
+            raise ValueError("unknown_structure_mode")
+        if self.length_strategy not in ("global", "greedy"):
+            raise ValueError("unknown_partition_length_strategy")
+
+
+def parse_algorithm_config(raw: object, require_complete: bool = False) -> SemanticConfig:
+    """按显式规则恢复算法配置；旧无版本字段格式始终恢复为0.1。
+
+    普通配置允许省略已声明版本的经验默认值；运行manifest使用
+    require_complete=True要求完整保存该版本全部字段。未知字段、未知版本
+    或把新策略塞入旧配置均抛ValueError，不静默忽略或推断升级。
+    """
+    if not isinstance(raw, dict):
+        raise ValueError("semantic_config_fields_invalid:algorithm")
+    cls = SemanticConfig
+    if "rule_version" in raw:
+        if raw["rule_version"] != STRUCTURED_RULE_VERSION:
+            raise ValueError("unknown_semantic_rule_version")
+        cls = StructuredSemanticConfig
+    fields = set(cls.__dataclass_fields__)
+    if set(raw) - fields or (require_complete and set(raw) != fields):
+        raise ValueError("semantic_config_fields_invalid:algorithm")
+    return cls(**raw)
+
+
+def semantic_rule_identity(config: SemanticConfig) -> tuple[str, str]:
+    """返回已登记配置类的规则／实现配对，同时防御性复验配置。
+
+    仅接受这两个确切类型，避免未登记子类借0.1身份携带额外行为。
+    实现身份属于算法；模型身份仍由EmbeddingConfig及provider独立绑定。
+    """
+    if type(config) is SemanticConfig:
+        SemanticConfig.__post_init__(config)
+        return RULE_VERSION, IMPLEMENTATION_VERSION
+    if type(config) is StructuredSemanticConfig:
+        StructuredSemanticConfig.__post_init__(config)
+        return STRUCTURED_RULE_VERSION, STRUCTURED_IMPLEMENTATION_VERSION
+    raise ValueError("invalid_semantic_config_type")
 
 
 @dataclass(frozen=True)
@@ -116,13 +187,11 @@ def parse_semantic_settings(raw: object) -> SemanticSettings:
     """从清单内JSON对象恢复同一配置契约；不接受未知字段或隐式类型转换。"""
     if not isinstance(raw, dict) or set(raw) != {"algorithm", "embedding"}:
         raise ValueError("semantic_config_fields_invalid")
-    values = []
-    for key, cls in (("algorithm", SemanticConfig), ("embedding", EmbeddingConfig)):
-        item = raw[key]
-        if not isinstance(item, dict) or set(item) - set(cls.__dataclass_fields__):
-            raise ValueError(f"semantic_config_fields_invalid:{key}")
-        values.append(cls(**item))
-    return SemanticSettings(*values)
+    algorithm = parse_algorithm_config(raw["algorithm"])
+    embedding = raw["embedding"]
+    if not isinstance(embedding, dict) or set(embedding) - set(EmbeddingConfig.__dataclass_fields__):
+        raise ValueError("semantic_config_fields_invalid:embedding")
+    return SemanticSettings(algorithm, EmbeddingConfig(**embedding))
 
 
 def validate_identity_settings(identity: dict, settings: EmbeddingConfig) -> None:
