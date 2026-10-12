@@ -25,7 +25,7 @@
 | --- | --- |
 | `data/` | 私有原始内容/图片归档、派生数据和人工标注；上游工作库只读 |
 | `src/tourism_ugc_study/cleaning/` | 数据清洗与质量标记逻辑 |
-| `src/tourism_ugc_study/segmentation/` | 独立客观文本切分、正文投影与只读研究语料适配 |
+| `src/tourism_ugc_study/segmentation/` | 正文投影、客观／候选语义切分与只读研究语料适配 |
 | `src/tourism_ugc_study/annotation/` | 最终参考集候选、人工证据、候补调度、artifact 和泄漏分组逻辑 |
 | `src/tourism_ugc_study/models/text/` | 文本基线、BERT/多头多标签模型与推断代码 |
 | `src/tourism_ugc_study/models/vision/` | 图像分类、表征学习与视觉推断代码 |
@@ -65,15 +65,17 @@ AutoDL-r2已完成17,853条纯预测，另承接1,402条同规范正文人工证
 
 只克隆Git仓库不会获得私有数据，须在授权本地资产环境执行该命令。历史13,858条结果、旧6,835条keep及旧2,286条人工任务只保留历史适用范围。详细状态见[当前状态与执行索引](docs/protocols/数据清洗当前状态与执行索引.md)。2026-09-27核验：独立TripPostAdmin项目已读取当前候选库的10,914条keep作为研究语料，人工终审状态不变。
 
-## 客观文本切分
+## 文本切分
 
-已将`objective-structure-0.5`规则迁入独立`segmentation`模块。当前研究语料全量
-只读切分通过：10,914条、191,844段、0条失败；迁移保留300条历史样本的原输出，
-并以独立实现ID补齐8条新输入触发的Unicode字素边界保护。2026-09-28已将结果存入
-`data/processed/text-segments-20260928/text-segments.sqlite`的唯一`text_segments`表，
-通过`source_post_id`关联原帖；50篇、911段随机抽查完成，旧重复运行文件已清理。
-2026-09-28 TripPostAdmin已接入该发布包，选材时固定正文与片段。接口、命令和验收见
-[客观文本切分模块接入](docs/protocols/客观文本切分模块接入.md)。
+文本编码已按`embedding-semantic-20261011`决定采用embedding自然语义分段；具体模型、
+边界配置和正式发布仍待验收。`objective-structure-0.5`已在独立`segmentation`模块中实现，旧发布结果为
+10,914帖／191,844段，通过`source_post_id`关联原帖，TripPostAdmin已接入。
+旧算法与结果已存档；新的TextTiling语义工程路径处于开发验证阶段，尚未替换正式活动结果。
+两种算法共用`text_segments`七字段结构，新批次使用新的发布包与片段身份。
+
+- 当前进度、证据与下一步：[总备忘录B05](docs/planning/研究问题与待办总备忘录.md#b05embedding自然语义分段与工程接入)。
+- 新语义路径的接口、短帖规则与验收：[适配与验证方案](docs/protocols/语义文本切分适配与验证方案.md)。
+- 现行客观路径、七字段存储与归档身份：[客观模块接入协议](docs/protocols/客观文本切分模块接入.md)。
 
 ## 当前可用入口
 

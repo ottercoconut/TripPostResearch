@@ -13,7 +13,8 @@ import regex
 
 RULE_VERSION = "objective-structure-0.5"
 IMPLEMENTATION_VERSION = "objective-structure-0.5-grapheme-safe-1"
-WHITE = frozenset("\t\n\v\f\r \x85\xa0\u1680\u2028\u2029\u202f\u205f\u3000" + "".join(chr(i) for i in range(0x2000, 0x200B)))
+from .integrity import WHITE, validate
+
 LINES = re.compile(r"\r\n|[\r\n\u2028\u2029]")
 STRONG = "。！？；!?;"
 PAIRS = {"“": "”", "‘": "’", "「": "」", "『": "』", "(": ")", "（": "）", "【": "】", "[": "]", "《": "》", "〈": "〉", '"': '"', "'": "'"}
@@ -281,25 +282,6 @@ def _make_segments(text: str, cuts: set[int]) -> list[dict]:
         if start < end:
             segments.append({"seg_id": len(segments) + 1, "raw_text": text[start:end], "start": start, "end": end})
     return segments
-
-
-def validate(text: str, segments: list[dict]) -> None:
-    """验证全部非空白字符恰好覆盖一次及字素边界；任一不变量破坏立即失败。"""
-    cluster_edges = {0, len(text)} | {m.start() for m in regex.finditer(r"\X", text)} | {m.end() for m in regex.finditer(r"\X", text)}
-    previous = 0
-    for index, segment in enumerate(segments, 1):
-        a, b = segment["start"], segment["end"]
-        if not (segment["seg_id"] == index and previous <= a < b <= len(text)):
-            raise ValueError("片段编号或区间非法")
-        if not (a in cluster_edges and b in cluster_edges):
-            raise ValueError("边界切入Unicode字素簇")
-        if not all(c in WHITE for c in text[previous:a]):
-            raise ValueError("丢失非空白字符")
-        if segment["raw_text"] != text[a:b]:
-            raise ValueError("片段不是原文连续子串")
-        previous = b
-    if not all(c in WHITE for c in text[previous:]):
-        raise ValueError("尾部非空白字符未覆盖")
 
 
 def segment(text: str) -> dict:

@@ -30,6 +30,8 @@ manual_review 3,036条。配对`candidate-manifest.json`及当前指针绑定实
 将191,844段存入`text-segments.sqlite`中的唯一`text_segments`表。源库与候选库
 保持只读；`source_post_id`关联源帖，批次及来源身份由配对manifest绑定。
 `current-text-segmentation.json`指向已验收的单表发布包及50篇随机抽查记录。
+这是Research本机检索指针；Admin实际读取`TRIPPOST_ADMIN_RESEARCH_SEGMENTATION_DIR`
+指定的整包，修改该指针不会切换Admin。新算法复用表结构，在新目录生成新的数据库文件。
 完整来源核验、单表字段与调用方式见[模块接入说明](../../docs/protocols/客观文本切分模块接入.md)。
 
 生成入口为 `scripts/cleaning_snapshot_topic_relevant.py`；源库路径通过

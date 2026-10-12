@@ -7,13 +7,14 @@
 - `src/tourism_ugc_study/`：可复用、可测试的核心 Python 代码。
   - `cleaning/`：文本规范化、质量检查和重复检测。
   - `annotation/`：抽样、标注导入、一致性检验和仲裁。
+  - `segmentation/`：正文投影、切分、向量接口及派生片段发布。
   - `models/text/`：文本基线、BERT 和多标签文本模型。
   - `models/vision/`：视觉编码、图像分类和视觉模型。
 - `scripts/`：平铺保存清洗、标注、训练、评估和发布入口，以 `cleaning_`、`annotation_`、`text_`、`vision_` 等前缀区分；核心逻辑放在 `src/`。
 - `configs/`：平铺保存配置，以领域前缀区分；同类配置实际增多后才建立子目录。
 - `data/processed/`：派生 SQLite、manifest 和分析就绪结果，默认不提交 Git。
 - `data/annotations/`：标注模板及实际发生的 `round_*` 轮次；编码簿仍在 `docs/data-dictionary/`。
-- `tests/`：目录与 `src/tourism_ugc_study/` 的实际模块对应；当前测试位于 `tests/cleaning/`，不要预建空的测试层级。
+- `tests/`：目录与 `src/tourism_ugc_study/` 的实际模块对应；只为已有模块和实际测试建立层级。
 - `notebooks/`：平铺保存探索、审计和可视化检查；论文最终结果必须由脚本重建。
 - `docs/`：保持分类目录；`data-dictionary/`、`methods/`、`protocols/`、`planning/`、`decisions/` 分别保存编码与术语、方法、协议、研究规划和研究决策。
 - `manuscript/`：当前论文正文放在根部，已经形成的格式化或投稿文档放在 `submission/`。

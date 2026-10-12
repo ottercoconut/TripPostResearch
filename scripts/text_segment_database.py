@@ -33,7 +33,10 @@ def main() -> int:
     sample.add_argument("--bundle", type=Path, required=True)
     sample.add_argument("--output", type=Path, required=True)
     sample.add_argument("--count", type=int, default=50)
-    sample.add_argument("--seed", type=int, default=20260928)
+    sample.add_argument("--seed", type=int, help="普通抽查默认20260928；独立抽查默认20261012")
+    sample.add_argument("--independent", action="store_true", help="锁参后独立抽查，必须列出全部开发／压力／调参排除清单")
+    sample.add_argument("--exclude-manifest", type=Path, action="append", default=[], help="来源绑定开发或比较manifest，可重复")
+    sample.add_argument("--exclusion-manifest", type=Path, help="显式来源绑定调参ID清单，artifact_kind=semantic-development-exclusions")
     args = parser.parse_args()
     try:
         if args.command == "import":
@@ -44,7 +47,10 @@ def main() -> int:
         elif args.command == "verify":
             result = verify_segment_bundle(args.bundle)
         else:
-            result = sample_segment_bundle(args.bundle, args.output, count=args.count, seed=args.seed)
+            seed = args.seed if args.seed is not None else (20261012 if args.independent else 20260928)
+            result = sample_segment_bundle(args.bundle, args.output, count=args.count, seed=seed,
+                exclude_manifests=tuple(args.exclude_manifest), exclusion_manifest=args.exclusion_manifest,
+                independent=args.independent)
     except (OSError, ValueError, KeyError, TypeError, sqlite3.Error, subprocess.CalledProcessError) as exc:
         print(f"片段数据库操作失败：{exc}", file=sys.stderr)
         return 1

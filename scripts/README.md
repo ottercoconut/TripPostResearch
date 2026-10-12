@@ -16,8 +16,12 @@ cleaning_run_remote_research_round.py # 已完成AutoDL每批500条回传、验�
 cleaning_assemble_research_round.py # 完整验收后装配候选，不发布正式keep
 cleaning_complete_research_round.py # 同轮等待完成与后处理，不重启模型
 cleaning_freeze_research_data.py  # prepare/seal/verify：原始内容、媒体和完成候选封存
-text_segment_research.py         # 独立客观切分：只读管理端10,914条keep，写新验收运行包
-text_segment_database.py         # 切分结果单表导入、全量核验和固定种子随机抽查
+text_segment_research.py         # 默认客观路径；显式算法配置启用受监督语义候选，Linux另需资源策略
+text_segment_database.py         # 单表导入/全量核验/随机抽查；支持独立抽查排除清单
+text_embedding_probe.py          # 默认0.6B CPU/MPS smoke；显式配置支持Linux/CUDA合成验证
+text_segment_development.py      # 开发抽样/单元核验、离线输入导出、回传run对本地来源复核
+text_segment_compare.py          # 一个模型run的最多九组参数重放、分层统计和待复核表
+text_segment_models.py           # 不同模型已完成比较包的技术汇总与原案例索引
 annotation_adjudicate.py          # 确认重复关系的泄漏分组
 annotation_build_reference.py     # 生成候选、冻结候补队列并封存最终700条参考集
 annotation_prepare_calibration.py # 研究内容共同校准主表转换
@@ -36,6 +40,8 @@ cleaning_model_reliability.py # 两个旧模型的纯预测人口框、Wave A盲
 cleaning_predict_tourism_relevance.py # 唯一生产入口：CSV纯预测、共享向量缓存与中间层表
 cleaning_retrain_routing_model.py # 已完成1,300条重训、路由与审计谱系的历史复现入口
 ```
+
+切分命令的当前用法见[语义适配协议](../docs/protocols/语义文本切分适配与验证方案.md#s11)，状态和私有证据见[总备忘录B05](../docs/planning/研究问题与待办总备忘录.md#b05固定编码单位与客观切分工程接入)；此清单只用于发现入口。
 
 ## 唯一生产推理入口
 

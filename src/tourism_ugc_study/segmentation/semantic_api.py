@@ -1,0 +1,120 @@
+"""组合正文投影、候选单元、向量和纯边界计算的显式语义接口。
+
+调用者负责初始化provider与缓存；本接口不打开数据库、不下载权重。
+逐帖投影／单元／边界失败带明确原因且无部分片段；模型或缓存异常向上抛出，
+使批处理停止系统性故障。旧纯函数入口不导入本模块，保持轻量和旧行为。
+"""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass
+import hashlib
+
+from .contracts import SegmentationIssue, SegmentationResult, SemanticDecision, TextUnit
+from .embedding import EmbeddingError, EmbeddingProvider, TokenCounter, identity_sha256, validate_vectors
+from .embedding_cache import EmbeddingCache
+from .integrity import validate
+from .projection import PROJECTION_ID, project_structured_text
+from .semantic_boundaries import choose_boundaries
+from .semantic_config import IMPLEMENTATION_VERSION, RULE_VERSION, SemanticConfig
+from .semantic_units import build_units
+
+
+@dataclass(frozen=True)
+class SemanticOutput:
+    """原兼容结果加语义trace，只有summary随逐帖证据进入发布包。
+
+    units及decision用于本地检查，不是新增数据库列。实际调用数按模型forward
+    计数，embedded_unit_count按参与评分单元计数，缓存命中仍属于语义参与。
+    """
+
+    result: SegmentationResult
+    units: tuple[TextUnit, ...]
+    decision: SemanticDecision
+    model_identity_sha256: str
+    vector_content_sha256: str | None
+    embedded_unit_count: int
+    cache_hit_count: int
+    model_call_count: int
+
+    def summary(self) -> dict:
+        """不含原文的紧凑诊断；投影reason_code保持原用途。"""
+        return {
+            "decision": self.decision.status, "reason_codes": list(self.decision.reason_codes),
+            "unit_count": len(self.units), "candidate_gap_count": max(0, len(self.units) - 1),
+            "embedded_unit_count": self.embedded_unit_count, "cache_hit_count": self.cache_hit_count,
+            "model_call_count": self.model_call_count,
+            "semantic_boundary_count": len(self.decision.semantic_boundaries),
+            "length_boundary_count": len(self.decision.length_boundaries),
+            "selected_boundary_count": len(self.decision.semantic_boundaries) + len(self.decision.length_boundaries),
+            "model_identity_sha256": self.model_identity_sha256,
+            "vector_content_sha256": self.vector_content_sha256,
+        }
+
+
+def segment_body_semantic(
+    body: str | None, *, provider: EmbeddingProvider, token_counter: TokenCounter,
+    config: SemanticConfig, cache: EmbeddingCache | None = None,
+) -> SemanticOutput:
+    """处理单帖原始正文，位置始终相对既有可读投影S。
+
+    空白和NULL成功返回空片段，损坏Delta失败。N≥2必须有有效向量，N≤1不作
+    无意义模型调用；批次级模型预检由调度层完成。所有异常诊断不包含原文。
+    """
+    if body is not None and not isinstance(body, str):
+        raise TypeError("body必须是字符串或None")
+    projection = project_structured_text("" if body is None else body)
+    source = projection.text if projection.status == "usable" else None
+    reason = "source_body_null" if body is None else projection.reason_code
+    model_hash = identity_sha256(provider.identity)
+    units = ()
+    segments = None
+    issues = ()
+    vector_hash = None
+    embedded_count = 0
+    decision = SemanticDecision("failed", (reason,), (), (), ())
+    hits_before = cache.cache_hit_count if cache else 0
+    calls_before = getattr(provider, "model_call_count", 0)
+    if source is not None:
+        try:
+            built = build_units(source, token_counter, config)
+            units = built.units
+        except EmbeddingError:
+            raise
+        except ValueError as exc:
+            decision = SemanticDecision("failed", (str(exc),), (), (), ())
+        else:
+            vectors = None
+            if len(units) >= 2:
+                texts = [source[u.start:u.end] for u in units]
+                # 模型和cache错误必须向上终止attempt，不能混作可继续的单帖错误。
+                vectors = cache.encode(texts, provider) if cache else provider.encode(texts)
+                vectors = validate_vectors(vectors, count=len(units), dimension=provider.identity["dimension"])
+                vector_hash = hashlib.sha256(vectors.astype("<f4").tobytes(order="C")).hexdigest()
+                embedded_count = len(units)
+            try:
+                segments, decision = choose_boundaries(source, units, vectors, config, token_counter)
+                validate(source, [asdict(s) for s in segments])
+            except EmbeddingError:
+                raise
+            except ValueError as exc:
+                segments = None
+                decision = SemanticDecision("failed", (str(exc),), (), (), ())
+            else:
+                codes = tuple(dict.fromkeys((*built.diagnostics, *decision.reason_codes)))
+                decision = SemanticDecision(decision.status, codes, decision.gaps,
+                                            decision.semantic_boundaries, decision.length_boundaries)
+                if not units:
+                    issues = (SegmentationIssue("EMPTY_BODY", 0, len(source)),)
+    result = SegmentationResult(
+        rule_version=RULE_VERSION, implementation_version=IMPLEMENTATION_VERSION,
+        projection_id=PROJECTION_ID, status="completed" if segments is not None else "failed",
+        reason_code=reason, body_was_null=body is None,
+        source_body_sha256=None if body is None else hashlib.sha256(body.encode()).hexdigest(),
+        source_text=source, source_text_sha256=None if source is None else hashlib.sha256(source.encode()).hexdigest(),
+        format_id=projection.format_id, text_insert_count=projection.text_insert_count,
+        ignored_embed_count=projection.ignored_embed_count, text_segments=segments, issues=issues,
+    )
+    return SemanticOutput(result, units, decision, model_hash, vector_hash, embedded_count,
+                          (cache.cache_hit_count - hits_before) if cache else 0,
+                          getattr(provider, "model_call_count", 0) - calls_before)

@@ -5,10 +5,117 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import re
 
-from .engine import IMPLEMENTATION_VERSION, RULE_VERSION, validate
+from .engine import IMPLEMENTATION_VERSION, RULE_VERSION
+from .integrity import validate
 from .projection import PROJECTION_ID, project_structured_text
+from .semantic_config import (
+    EmbeddingConfig, SemanticConfig, parse_semantic_settings, validate_identity_settings,
+    IMPLEMENTATION_VERSION as SEMANTIC_IMPLEMENTATION_VERSION,
+    RULE_VERSION as SEMANTIC_RULE_VERSION, RUN_KIND as SEMANTIC_RUN_KIND,
+)
 from .source import ResearchPost, file_sha256
+
+
+def _sha256(value: object) -> bool:
+    """仅接受64位小写十六进制身份，不将任意等长字符串当作摘要。"""
+    return isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+
+
+def _json_sha256(value: object) -> str:
+    """在不加载模型依赖的情况下核验有限JSON身份。"""
+    try:
+        raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    except (TypeError, ValueError):
+        raise ValueError("语义身份不是有限JSON") from None
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _validate_semantic_identity(manifest: dict) -> None:
+    """核验声明配置、实际模型身份与摘要；不把身份声明当作重新运行模型。"""
+    config = manifest.get("config")
+    if not isinstance(config, dict) or set(config) != {"algorithm", "embedding"}:
+        raise ValueError("语义运行配置字段非法")
+    for name, cls in (("algorithm", SemanticConfig), ("embedding", EmbeddingConfig)):
+        raw = config[name]
+        if not isinstance(raw, dict) or set(raw) != set(cls.__dataclass_fields__):
+            raise ValueError("语义运行配置必须完整保存所有字段")
+    try:
+        settings = parse_semantic_settings(config)
+    except (TypeError, ValueError):
+        raise ValueError("语义运行配置值非法") from None
+    if not _sha256(manifest.get("config_sha256")) or settings.fingerprint != manifest["config_sha256"]:
+        raise ValueError("语义运行配置摘要不匹配")
+    identity = manifest.get("model_identity")
+    if not isinstance(identity, dict) or not _sha256(manifest.get("model_identity_sha256")):
+        raise ValueError("缺少完整语义模型身份")
+    if _json_sha256(identity) != manifest["model_identity_sha256"]:
+        raise ValueError("语义模型身份摘要不匹配")
+    validate_identity_settings(identity, settings.embedding)
+    assets = identity.get("assets_sha256")
+    required_assets = {"config.json", "tokenizer.json", "tokenizer_config.json", "vocab.json", "merges.txt"}
+    if (not isinstance(assets, dict) or not required_assets <= set(assets)
+            or any(not isinstance(name, str) or Path(name).name != name or not _sha256(digest) for name, digest in assets.items())
+            or not any(name.endswith(".safetensors") for name in assets)):
+        raise ValueError("语义模型缺少本地资产摘要")
+    dependencies = identity.get("dependencies")
+    if (not isinstance(dependencies, dict)
+            or not {"torch", "transformers", "tokenizers", "huggingface-hub", "numpy"} <= set(dependencies)
+            or any(not isinstance(value, str) or not value for value in dependencies.values())):
+        raise ValueError("语义模型缺少运行依赖身份")
+
+
+def validate_run_manifest(manifest: dict) -> None:
+    """公共发布门：只认可已登记的完整旧规则或完整语义运行契约。
+
+    原始run和五文件发布包共用此门，不能通过直接复验发布包绕开开发集隔离。
+    本函数验证清单内身份及计数；原始trace文件摘要由require_records_hash核验。
+    发布包只保留trace摘要，单凭五文件不能宣称已重放向量或语义边界。
+    """
+    if not isinstance(manifest, dict):
+        raise ValueError("切分运行清单必须为对象")
+    kind = manifest.get("artifact_kind")
+    versions = {"objective-text-segmentation-run": (RULE_VERSION, IMPLEMENTATION_VERSION),
+                SEMANTIC_RUN_KIND: (SEMANTIC_RULE_VERSION, SEMANTIC_IMPLEMENTATION_VERSION)}
+    counts = manifest.get("counts")
+    if (kind not in versions or not isinstance(counts, dict)
+            or manifest.get("status") != "completed" or type(counts.get("failed_count")) is not int
+            or counts["failed_count"] != 0 or manifest.get("projection_id") != PROJECTION_ID
+            or manifest.get("posts_filename") != "posts.jsonl"
+            or (manifest.get("rule_version"), manifest.get("implementation_version")) != versions[kind]):
+        raise ValueError("只允许导入已登记契约的完整成功切分运行")
+    if kind != SEMANTIC_RUN_KIND:
+        return
+    if (manifest.get("scope") != "full_corpus" or "selected_post_ids" not in manifest
+            or manifest["selected_post_ids"] is not None
+            or manifest.get("sampling") != "all_keep_ordered_by_source_post_id"):
+        raise ValueError("开发样本不能导入正式片段发布包")
+    source = manifest.get("input")
+    fields = ("post_count", "completed_count", "failed_count", "segment_count", "empty_count",
+              "null_body_count", "structured_body_count", "posts_with_issues",
+              "embedded_unit_count", "cache_hit_count", "model_call_count")
+    if (not isinstance(source, dict) or type(source.get("record_count")) is not int or source["record_count"] < 0
+            or any(type(counts.get(key)) is not int or counts[key] < 0 for key in fields)
+            or counts["post_count"] != counts["completed_count"] or counts["post_count"] != source["record_count"]
+            or any(counts[key] > counts["post_count"] for key in ("empty_count", "null_body_count", "structured_body_count", "posts_with_issues"))
+            or counts["cache_hit_count"] > counts["embedded_unit_count"]
+            or counts["model_call_count"] > counts["embedded_unit_count"]):
+        raise ValueError("语义运行计数与完整来源不一致")
+    if (manifest.get("trace_filename") != "semantic-trace.jsonl" or not _sha256(manifest.get("trace_sha256"))
+            or not _sha256(manifest.get("posts_sha256")) or not _sha256(manifest.get("ordered_input_sha256"))):
+        raise ValueError("语义运行缺少结果或trace摘要")
+    decisions = manifest.get("decision_counts")
+    if (not isinstance(decisions, dict)
+            or set(decisions) - {"empty", "single_unit", "scored_keep", "scored_split", "length_split"}
+            or any(type(count) is not int or count < 1 for count in decisions.values())
+            or sum(decisions.values()) != counts["post_count"]
+            or decisions.get("empty", 0) != counts["empty_count"]
+            or manifest.get("failure_counts") != {}
+            or any(type(manifest.get(key)) is not int or manifest[key] != 0 for key in
+                   ("source_database_write_count", "membership_database_write_count"))):
+        raise ValueError("语义决策总计或只读来源声明非法")
+    _validate_semantic_identity(manifest)
 
 
 def load_run_manifest(run: Path) -> tuple[dict, str]:
@@ -16,14 +123,7 @@ def load_run_manifest(run: Path) -> tuple[dict, str]:
     path = run / "manifest.json"
     raw = path.read_bytes()
     manifest = json.loads(raw)
-    if (manifest.get("artifact_kind") != "objective-text-segmentation-run"
-            or manifest.get("status") != "completed"
-            or manifest.get("counts", {}).get("failed_count") != 0
-            or manifest.get("rule_version") != RULE_VERSION
-            or manifest.get("implementation_version") != IMPLEMENTATION_VERSION
-            or manifest.get("projection_id") != PROJECTION_ID
-            or manifest.get("posts_filename") != "posts.jsonl"):
-        raise ValueError("只允许导入当前契约的完整成功切分运行")
+    validate_run_manifest(manifest)
     return manifest, hashlib.sha256(raw).hexdigest()
 
 
@@ -31,6 +131,45 @@ def require_records_hash(run: Path, manifest: dict) -> None:
     """核验完整JSONL字节；调用方在遍历前后执行，防止读入损坏或中途换文件。"""
     if file_sha256(run / "posts.jsonl") != manifest["posts_sha256"]:
         raise ValueError("切分JSONL摘要不匹配")
+    if manifest["artifact_kind"] == SEMANTIC_RUN_KIND:
+        trace = run / "semantic-trace.jsonl"
+        if not trace.is_file() or file_sha256(trace) != manifest["trace_sha256"]:
+            raise ValueError("语义trace缺失或摘要不匹配")
+
+
+def _validate_semantic_summary(record: dict, manifest: dict, segment_count: int) -> None:
+    """检查逐帖摘要的状态机、参与数量和模型绑定，不伪称语义效果已经复核。"""
+    summary = record.get("semantic_diagnostics")
+    numbers = ("unit_count", "candidate_gap_count", "embedded_unit_count", "cache_hit_count", "model_call_count",
+               "semantic_boundary_count", "length_boundary_count", "selected_boundary_count")
+    keys = {*numbers, "decision", "reason_codes", "model_identity_sha256", "vector_content_sha256"}
+    if (not isinstance(summary, dict) or set(summary) != keys
+            or any(type(summary[key]) is not int or summary[key] < 0 for key in numbers)
+            or not isinstance(summary["reason_codes"], list) or not summary["reason_codes"]
+            or any(not isinstance(code, str) or not re.fullmatch(r"[a-z][a-z0-9_]*", code) for code in summary["reason_codes"])
+            or summary["model_identity_sha256"] != manifest["model_identity_sha256"]):
+        raise ValueError("语义逐帖摘要字段或模型身份非法")
+    units = summary["unit_count"]
+    semantic = summary["semantic_boundary_count"]
+    length = summary["length_boundary_count"]
+    if (summary["candidate_gap_count"] != max(0, units - 1)
+            or summary["selected_boundary_count"] != semantic + length
+            or semantic + length != max(0, segment_count - 1)
+            or (units > 0 and segment_count == 0) or segment_count > units or segment_count > 2000
+            or summary["cache_hit_count"] > summary["embedded_unit_count"]
+            or summary["model_call_count"] > summary["embedded_unit_count"]):
+        raise ValueError("语义逐帖单元、片段或边界计数不一致")
+    if units <= 1:
+        if (summary["decision"] != ("empty" if units == 0 else "single_unit")
+                or segment_count != units or summary["embedded_unit_count"] != 0
+                or summary["cache_hit_count"] != 0 or summary["model_call_count"] != 0
+                or summary["vector_content_sha256"] is not None):
+            raise ValueError("无语义评分路径的摘要非法")
+    elif (summary["decision"] != ("length_split" if length else "scored_split" if semantic else "scored_keep")
+            or summary["embedded_unit_count"] != units or not _sha256(summary["vector_content_sha256"])
+            or (summary["cache_hit_count"] == units and summary["model_call_count"] != 0)
+            or (summary["cache_hit_count"] < units and not 1 <= summary["model_call_count"] <= units - summary["cache_hit_count"])):
+        raise ValueError("语义评分路径的摘要非法")
 
 
 def validate_post_record(record: dict, source: ResearchPost, manifest: dict) -> None:
@@ -77,3 +216,5 @@ def validate_post_record(record: dict, source: ResearchPost, manifest: dict) -> 
                 or type(item["start"]) is not int or type(item["end"]) is not int
                 or not 0 <= item["start"] <= item["end"] <= len(projection.text)):
             raise ValueError("格式诊断范围或类型非法")
+    if manifest.get("artifact_kind") == SEMANTIC_RUN_KIND:
+        _validate_semantic_summary(record, manifest, len(segments))

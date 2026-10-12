@@ -7,6 +7,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+
+
+class EmbeddingError(ValueError):
+    """模型／tokenizer／缓存契约失败，必须终止attempt，不能降为逐帖失败。
+
+    放在轻量契约层，单元构造可以识别系统故障而无需导入numpy或模型依赖。
+    """
 from typing import Literal
 
 
@@ -56,3 +63,55 @@ class SegmentationResult:
     ignored_embed_count: int
     text_segments: tuple[TextSegment, ...] | None
     issues: tuple[SegmentationIssue, ...]
+
+
+@dataclass(frozen=True)
+class TextUnit:
+    """参与语义比较的候选单元；文字直接取S[start:end]，不代表最终片段。
+
+    token_count仅计正文，不含模型指令；端点为完整字素边界，空白间隙允许。
+    构建与边界入口负责验证，结构自身不调用tokenizer或模型。
+    """
+
+    start: int
+    end: int
+    token_count: int
+
+
+@dataclass(frozen=True)
+class UnitizationResult:
+    """候选单元及不含原文的诊断码；失败抛异常，不返回半份单元。"""
+
+    units: tuple[TextUnit, ...]
+    diagnostics: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class GapScore:
+    """两个相邻单元间的评分；index为零基gap序号，不是原文码点位置。
+
+    candidate表示低谷候选，selected表示最终保留为边界；reason解释阈值、
+    短段抑制或长度保护。无语义评分的路径不虚构gap数据。
+    """
+
+    index: int
+    cohesion: float
+    depth: float
+    candidate: bool
+    selected: bool
+    reason: str
+
+
+@dataclass(frozen=True)
+class SemanticDecision:
+    """单帖语义决策与可重放trace；两组boundaries均为零基gap序号。
+
+    status区分empty/single_unit/scored_keep/scored_split/length_split/failed；
+    本结构不改变SegmentationResult.reason_code的正文投影含义。
+    """
+
+    status: str
+    reason_codes: tuple[str, ...]
+    gaps: tuple[GapScore, ...]
+    semantic_boundaries: tuple[int, ...]
+    length_boundaries: tuple[int, ...]
