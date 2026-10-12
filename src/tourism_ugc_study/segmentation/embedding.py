@@ -246,6 +246,8 @@ class QwenEmbeddingProvider(QwenTokenCounter):
 
     只接受 CPU/MPS/CUDA 和明确的浮点精度；无量化、自动设备分配、
     自动重试或模型降级。每次 encode 都实际推理，缓存由独立模块控制。
+    CUDA使用固定输入宽度，避免同一输入因伙伴长度改变pad位置及计算形状；
+    CPU/MPS保留既有最长输入padding行为及身份。
     """
 
     def __init__(self, *, model_id: str, revision: str, device: str, dtype: str,
@@ -312,6 +314,8 @@ class QwenEmbeddingProvider(QwenTokenCounter):
         self.identity["torch_num_threads"] = torch.get_num_threads()
         self.identity["dependencies"]["torch"] = importlib.metadata.version("torch")
         if device == "cuda":
+            # 输入布局影响CUDA向量；新字段隔离旧最长padding缓存，不改变Mac身份。
+            self.identity.update(padding_strategy="max_length", padding_max_length=self.max_input_tokens)
             self.identity.update(actual_parameters)
             properties = torch.cuda.get_device_properties(torch.cuda.current_device())
             self.identity["cuda_device_name"] = properties.name
@@ -353,9 +357,12 @@ class QwenEmbeddingProvider(QwenTokenCounter):
         if not values:
             return np.empty((0, dimension), dtype=np.float32)
         output = []
+        # 固定CUDA序列宽度及左pad位置，仍禁止截断；CPU/MPS不增加max_length参数。
+        padding = ({"padding": "max_length", "max_length": self.max_input_tokens}
+                   if self.device == "cuda" else {"padding": True})
         for begin in range(0, len(values), self.batch_size):
             batch = self.tokenizer([self.format_input(t) for t in values[begin:begin + self.batch_size]],
-                                   padding=True, truncation=False, add_special_tokens=True,
+                                   **padding, truncation=False, add_special_tokens=True,
                                    return_tensors="pt").to(self.device)
             if batch["input_ids"].shape[1] > self.max_input_tokens:
                 raise EmbeddingError("model_input_limit_exceeded")
