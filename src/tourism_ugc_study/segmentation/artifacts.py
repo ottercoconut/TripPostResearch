@@ -8,6 +8,11 @@ from __future__ import annotations
 
 import json
 import os
+import platform
+import unicodedata
+import regex
+
+from .source import file_sha256
 import shutil
 import tempfile
 from contextlib import contextmanager
@@ -47,3 +52,13 @@ def new_run_directory(output: Path) -> Iterator[Path]:
     finally:
         if staging.exists():
             shutil.rmtree(staging)
+
+
+def runtime_identity() -> dict[str, object]:
+    """记录Python、Unicode、regex和核心模块字节身份，不加载模型。"""
+    root = Path(__file__).parent
+    return {
+        "python": platform.python_version(), "implementation": platform.python_implementation(),
+        "unicode": unicodedata.unidata_version, "regex": regex.__version__,
+        "module_sha256": {p.name: file_sha256(p) for p in sorted(root.glob("*.py"))},
+    }

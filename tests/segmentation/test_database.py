@@ -7,20 +7,22 @@ import sqlite3
 
 import pytest
 
-from tourism_ugc_study.segmentation.batch import run_research_segmentation
+from test_semantic_api import SyntheticProvider
 from tourism_ugc_study.segmentation.config import ResearchInput
 from tourism_ugc_study.segmentation.database_audit import sample_segment_bundle, verify_segment_bundle
 from tourism_ugc_study.segmentation.importer import import_segmentation_run
+from tourism_ugc_study.segmentation.semantic_batch import run_semantic_batch
+from tourism_ugc_study.segmentation.semantic_config import load_semantic_settings
 from tourism_ugc_study.segmentation.source import file_sha256
 from tourism_ugc_study.segmentation.storage import get_post_segments, open_segment_database
 
 
 @pytest.fixture
 def prepared(tmp_path):
-    """产生含普通文、Delta、空白和排除项的配对库及真实切分运行包。"""
+    """产生配对库并执行当前算法；仅向量／模型资产身份使用显式合成替身。"""
     source, members = tmp_path / "source.sqlite", tmp_path / "members.sqlite"
-    rows = [(1, "甲。乙！", "keep"),
-            (2, '{"ops":[{"insert":"丙。丁。"}]}', "keep"),
+    rows = [(1, "甲" * 15 + "。" + "乙" * 15 + "！", "keep"),
+            (2, json.dumps({"ops": [{"insert": "丙" * 15 + "。" + "丁" * 15 + "。"}]}), "keep"),
             (3, " \n", "keep"), (4, "不保留。", "exclude")]
     with sqlite3.connect(source) as con:
         con.execute("CREATE TABLE web_posts(id INTEGER PRIMARY KEY,platform_key TEXT,title TEXT,content_text TEXT)")
@@ -45,7 +47,15 @@ def prepared(tmp_path):
     path.write_text(json.dumps(manifest))
     config = ResearchInput(members, source, path, file_sha256(path))
     run = tmp_path / "run"
-    run_research_segmentation(config, run, code_version="synthetic")
+    settings = load_semantic_settings(Path(__file__).resolve().parents[2] / "configs/text-segmentation-semantic-8b-coherent.json")
+    provider = SyntheticProvider(settings.embedding)
+    provider.identity.update(
+        padding_strategy="max_length", padding_max_length=settings.embedding.max_input_tokens,
+        assets_sha256={name: "a" * 64 for name in ("config.json", "tokenizer.json", "tokenizer_config.json",
+                                                   "vocab.json", "merges.txt", "model.safetensors")},
+        dependencies={name: "synthetic" for name in ("torch", "transformers", "tokenizers", "huggingface-hub", "numpy")},
+    )
+    run_semantic_batch(config, run, code_version="synthetic", settings=settings, provider=provider)
     return config, run, tmp_path / "database"
 
 
@@ -59,7 +69,7 @@ def test_single_table_round_trip_and_idempotency(prepared):
     with closing(open_segment_database(output / "text-segments.sqlite")) as con:
         assert [r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")] == ["text_segments"]
         parts = get_post_segments(con, result["batch_id"], 1)
-        assert [p["text"] for p in parts] == ["甲。", "乙！"]
+        assert [p["text"] for p in parts] == ["甲" * 15 + "。", "乙" * 15 + "！"]
         assert len({p["segment_id"] for p in parts}) == 2
         with pytest.raises(sqlite3.OperationalError):
             con.execute("DELETE FROM text_segments")

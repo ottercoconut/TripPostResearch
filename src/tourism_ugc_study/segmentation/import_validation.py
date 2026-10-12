@@ -7,12 +7,11 @@ import json
 from pathlib import Path
 import re
 
-from .engine import IMPLEMENTATION_VERSION, RULE_VERSION
 from .integrity import validate
 from .projection import PROJECTION_ID, project_structured_text
 from .semantic_config import (
     EmbeddingConfig, parse_algorithm_config, parse_semantic_settings, validate_identity_settings,
-    validate_semantic_rule_identity, RUN_KIND as SEMANTIC_RUN_KIND,
+    validate_current_frozen_settings, validate_semantic_rule_identity, RUN_KIND as SEMANTIC_RUN_KIND,
 )
 from .source import ResearchPost, file_sha256
 
@@ -43,6 +42,7 @@ def _validate_semantic_identity(manifest: dict) -> None:
     try:
         parse_algorithm_config(config["algorithm"], require_complete=True)
         settings = parse_semantic_settings(config)
+        validate_current_frozen_settings(settings)
     except (TypeError, ValueError):
         raise ValueError("语义运行配置值非法") from None
     if not _sha256(manifest.get("config_sha256")) or settings.fingerprint != manifest["config_sha256"]:
@@ -67,7 +67,7 @@ def _validate_semantic_identity(manifest: dict) -> None:
 
 
 def validate_run_manifest(manifest: dict) -> None:
-    """公共发布门：只认可已登记的完整旧规则或完整语义运行契约。
+    """公共发布门：只认可当前冻结连贯块规则的完整全量运行。
 
     原始run和五文件发布包共用此门，不能通过直接复验发布包绕开开发集隔离。
     本函数验证清单内身份及计数；原始trace文件摘要由require_records_hash核验。
@@ -76,20 +76,16 @@ def validate_run_manifest(manifest: dict) -> None:
     if not isinstance(manifest, dict):
         raise ValueError("切分运行清单必须为对象")
     kind = manifest.get("artifact_kind")
-    # 每个语义配置显式绑定其登记配对；不能把8B型号当作新算法版本。
-    versions = {"objective-text-segmentation-run": (RULE_VERSION, IMPLEMENTATION_VERSION)}
-    if kind == SEMANTIC_RUN_KIND:
-        validate_semantic_rule_identity(manifest)
-        versions[kind] = (manifest["rule_version"], manifest["implementation_version"])
+    # 历史产物留在归档；线上导入与五文件复验均不再解释退役算法。
+    if kind != SEMANTIC_RUN_KIND:
+        raise ValueError("只允许导入当前冻结连贯块规则的完整成功切分运行")
+    validate_semantic_rule_identity(manifest)
     counts = manifest.get("counts")
-    if (kind not in versions or not isinstance(counts, dict)
+    if (not isinstance(counts, dict)
             or manifest.get("status") != "completed" or type(counts.get("failed_count")) is not int
             or counts["failed_count"] != 0 or manifest.get("projection_id") != PROJECTION_ID
-            or manifest.get("posts_filename") != "posts.jsonl"
-            or (manifest.get("rule_version"), manifest.get("implementation_version")) != versions[kind]):
+            or manifest.get("posts_filename") != "posts.jsonl"):
         raise ValueError("只允许导入已登记契约的完整成功切分运行")
-    if kind != SEMANTIC_RUN_KIND:
-        return
     if (manifest.get("scope") != "full_corpus" or "selected_post_ids" not in manifest
             or manifest["selected_post_ids"] is not None
             or manifest.get("sampling") != "all_keep_ordered_by_source_post_id"):
@@ -134,10 +130,9 @@ def require_records_hash(run: Path, manifest: dict) -> None:
     """核验完整JSONL字节；调用方在遍历前后执行，防止读入损坏或中途换文件。"""
     if file_sha256(run / "posts.jsonl") != manifest["posts_sha256"]:
         raise ValueError("切分JSONL摘要不匹配")
-    if manifest["artifact_kind"] == SEMANTIC_RUN_KIND:
-        trace = run / "semantic-trace.jsonl"
-        if not trace.is_file() or file_sha256(trace) != manifest["trace_sha256"]:
-            raise ValueError("语义trace缺失或摘要不匹配")
+    trace = run / "semantic-trace.jsonl"
+    if not trace.is_file() or file_sha256(trace) != manifest["trace_sha256"]:
+        raise ValueError("语义trace缺失或摘要不匹配")
 
 
 def _validate_semantic_summary(record: dict, manifest: dict, segment_count: int) -> None:
@@ -219,5 +214,4 @@ def validate_post_record(record: dict, source: ResearchPost, manifest: dict) -> 
                 or type(item["start"]) is not int or type(item["end"]) is not int
                 or not 0 <= item["start"] <= item["end"] <= len(projection.text)):
             raise ValueError("格式诊断范围或类型非法")
-    if manifest.get("artifact_kind") == SEMANTIC_RUN_KIND:
-        _validate_semantic_summary(record, manifest, len(segments))
+    _validate_semantic_summary(record, manifest, len(segments))

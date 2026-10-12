@@ -13,7 +13,7 @@ from test_semantic_api import SyntheticProvider
 from tourism_ugc_study.segmentation.config import ResearchInput
 from tourism_ugc_study.segmentation.embedding import EmbeddingError
 from tourism_ugc_study.segmentation.semantic_batch import run_semantic_batch
-from tourism_ugc_study.segmentation.semantic_config import EmbeddingConfig, SemanticConfig, SemanticSettings
+from tourism_ugc_study.segmentation.semantic_config import EmbeddingConfig, CoherentSemanticConfig, SemanticSettings
 from tourism_ugc_study.segmentation.source import file_sha256
 
 
@@ -52,7 +52,7 @@ def make_input(root: Path, rows=None):
 
 def settings():
     """显式CPU测试身份，避免使用正式默认MPS路径或权重加载。"""
-    return SemanticSettings(SemanticConfig(), EmbeddingConfig(device="cpu"))
+    return SemanticSettings(CoherentSemanticConfig(), EmbeddingConfig(device="cpu"))
 
 
 def read_rows(path):

@@ -19,14 +19,14 @@ def _units(parts, separator=""):
     return text, tuple(units)
 
 
-def test_sentence_only_distinguishes_sentence_line_and_artificial_gap():
+def test_structure_distinguishes_sentence_line_and_artificial_gap():
     """逗号细分不是自然句末，换行与附闭引号的句末可独立消融。"""
     text, units = _units(["这里有海，", "那里有山。", "“公交方便！”", "继续行走"])
-    result = analyze_gap_structure(text, units, mode="sentence_only")
+    result = analyze_gap_structure(text, units)
     assert [gap.boundary_kind for gap in result] == ["internal", "sentence", "sentence"]
     assert [gap.penalty for gap in result] == [8, 0, 0]
     text, units = _units(["海滨", "山地"], "\r\n\u3000")
-    assert analyze_gap_structure(text, units, mode="sentence_only")[0].boundary_kind == "line"
+    assert analyze_gap_structure(text, units)[0].boundary_kind == "line"
 
 
 def test_matched_bracket_discourages_inner_sentence_boundary_only():
@@ -36,7 +36,6 @@ def test_matched_bracket_discourages_inner_sentence_boundary_only():
     assert "inside_matched_bracket" in first.reasons and first.penalty == 12
     assert "inside_matched_bracket" not in second.reasons and second.penalty == 0
     assert first.evidence_spans[-1] == ("inside_matched_bracket", 4, 17)
-    assert analyze_gap_structure(text, units, mode="sentence_only")[0].penalty == 0
 
 
 def test_unclosed_intro_bracket_does_not_protect_whole_post():
@@ -65,7 +64,6 @@ def test_explicit_short_heading_prefers_its_following_description(heading):
     before, after = analyze_gap_structure(text, units)
     assert "before_heading" in before.reasons
     assert "after_heading" in after.reasons and after.penalty == 6
-    assert "after_heading" not in analyze_gap_structure(text, units, mode="sentence_only")[1].reasons
 
 
 def test_heading_split_by_sentence_punctuation_can_share_line_with_body():
@@ -139,12 +137,6 @@ def test_invalid_units_fail_with_reason_only(text, units, error):
     """坏坐标、漏字和字素拆坏不可借开发候选蒙混通过。"""
     with pytest.raises(ValueError, match=f"^{error}$"):
         analyze_gap_structure(text, units)
-
-
-def test_invalid_mode_fails_even_for_empty_input():
-    """模式拼写错误不能静默退回默认候选。"""
-    with pytest.raises(ValueError, match="^invalid_structure_mode$"):
-        analyze_gap_structure("", (), mode="other")
 
 
 def test_repeated_checkmark_entries_keep_full_descriptions_and_stop_before_hashtags():

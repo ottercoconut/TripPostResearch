@@ -19,7 +19,6 @@ from .artifacts import canonical_json, new_run_directory, write_json
 from .config import ResearchInput, load_research_input
 from .import_validation import validate_post_record, validate_run_manifest
 from .projection import project_structured_text
-from .semantic_config import RUN_KIND as SEMANTIC_RUN_KIND
 from .source import file_sha256, open_research_corpus
 from .storage import get_post_segments, open_segment_database, segment_identifier
 
@@ -152,14 +151,13 @@ def verify_segment_bundle(bundle: Path, config: ResearchInput | None = None) -> 
                     for r in rows
                 ]
                 validate_post_record(record, post, run)
-                if run["artifact_kind"] == SEMANTIC_RUN_KIND:
-                    summary = record["semantic_diagnostics"]
-                    semantic_counts.update({"post_count": 1, "completed_count": 1, "segment_count": len(rows),
-                        "empty_count": int(not rows), "null_body_count": int(record["body_was_null"]),
-                        "structured_body_count": int(record["format_id"] == "quill_delta_json"),
-                        "posts_with_issues": int(bool(record["issues"])),
-                        **{key: summary[key] for key in ("embedded_unit_count", "cache_hit_count", "model_call_count")}})
-                    semantic_decisions[summary["decision"]] += 1
+                summary = record["semantic_diagnostics"]
+                semantic_counts.update({"post_count": 1, "completed_count": 1, "segment_count": len(rows),
+                    "empty_count": int(not rows), "null_body_count": int(record["body_was_null"]),
+                    "structured_body_count": int(record["format_id"] == "quill_delta_json"),
+                    "posts_with_issues": int(bool(record["issues"])),
+                    **{key: summary[key] for key in ("embedded_unit_count", "cache_hit_count", "model_call_count")}})
+                semantic_decisions[summary["decision"]] += 1
                 # 重建逐字JSONL摘要，证明压缩证据加新表足以还原被替代的大文件。
                 output_digest.update((canonical_json(record) + "\n").encode())
                 post_count += 1
@@ -171,8 +169,7 @@ def verify_segment_bundle(bundle: Path, config: ResearchInput | None = None) -> 
             or output_digest.hexdigest() != run["posts_sha256"]
             or manifest["source_records_sha256"] != run["posts_sha256"]):
         raise ValueError("全量入库结果无法精确还原原始切分运行")
-    if run["artifact_kind"] == SEMANTIC_RUN_KIND and (
-            any(semantic_counts[key] != value for key, value in run["counts"].items())
+    if (any(semantic_counts[key] != value for key, value in run["counts"].items())
             or dict(semantic_decisions) != run.get("decision_counts") or run.get("failure_counts") != {}):
         raise ValueError("语义运行汇总与逐帖证据计数不一致")
     _load_bundle(bundle)
@@ -218,7 +215,7 @@ def sample_segment_bundle(bundle: Path, output: Path, *, count: int, seed: int,
                           independent: bool = False) -> dict:
     """全量复核后随机抽取count篇帖子，保存正文、分段及待填写审阅材料。
 
-    旧默认行为仍从全人口简单随机抽样。independent 要求显式来源绑定排除
+    普通抽查从全人口简单随机抽样。independent 要求显式来源绑定排除
     清单，排除后不足 count 直接失败；不补抽、预看或混入已参与调参的个案。
     只产生随机材料与自动验证状态，质量审阅始终 pending。
     """

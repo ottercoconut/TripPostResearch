@@ -19,7 +19,7 @@ from .contracts import EmbeddingError, TextUnit, UnitizationResult
 from .integrity import WHITE
 
 if TYPE_CHECKING:
-    from .semantic_config import SemanticConfig
+    from .semantic_config import CoherentSemanticConfig
 
 
 class UnitTokenCounter(Protocol):
@@ -165,7 +165,7 @@ def _checked_offsets(counter: UnitTokenCounter, value: str, token_count: int) ->
 
 def _unit(
     text: str, start: int, end: int, count: int, counter: UnitTokenCounter,
-    config: SemanticConfig, diagnostics: list[str], *, single_grapheme: bool,
+    config: CoherentSemanticConfig, diagnostics: list[str], *, single_grapheme: bool,
 ) -> TextUnit:
     """发布单个已定位单元前重检输入；单字素例外不得越过硬性限制。"""
     input_count = _checked_count(counter, text[start:end], model_input=True)
@@ -182,7 +182,7 @@ def _unit(
 
 def _split_span(
     text: str, span: tuple[int, int], boundaries: tuple[int, ...], counter: UnitTokenCounter,
-    config: SemanticConfig, diagnostics: list[str],
+    config: CoherentSemanticConfig, diagnostics: list[str],
 ) -> list[TextUnit]:
     """按弱边界、token offset、逐字素回退的顺序拆长单元，cursor 严格前进。"""
     cursor, end = span
@@ -242,7 +242,7 @@ def _split_span(
     return units
 
 
-def build_units(text: str, counter: UnitTokenCounter, config: SemanticConfig) -> UnitizationResult:
+def build_units(text: str, counter: UnitTokenCounter, config: CoherentSemanticConfig) -> UnitizationResult:
     """构造有界、字素安全且保持原文的候选单元，不作语义合并。
 
     输入必须为已投影的可读字符串；空白返回空 units，NULL 应由投影层处理。

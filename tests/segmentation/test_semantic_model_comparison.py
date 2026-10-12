@@ -12,7 +12,7 @@ from tourism_ugc_study.segmentation import embedding
 from tourism_ugc_study.segmentation.embedding import identity_sha256
 from tourism_ugc_study.segmentation.semantic_batch import run_semantic_batch
 from tourism_ugc_study.segmentation.semantic_comparison import compare_semantic_configs
-from tourism_ugc_study.segmentation.semantic_config import EmbeddingConfig, SemanticConfig, SemanticSettings
+from tourism_ugc_study.segmentation.semantic_config import EmbeddingConfig, CoherentSemanticConfig, SemanticSettings
 from tourism_ugc_study.segmentation.semantic_evaluation import prepare_development_sample
 from tourism_ugc_study.segmentation.semantic_model_comparison import ModelComparisonInput, compare_semantic_models
 from tourism_ugc_study.segmentation.source import file_sha256
@@ -30,7 +30,7 @@ def model_comparisons(tmp_path):
     specs = (("0.6B", "97b0c614be4d77ee51c0cef4e5f07c00f9eb65b3"),
              ("4B", "5cf2132abc99cad020ac570b19d031efec650f2b"))
     for index, (size, revision) in enumerate(specs):
-        settings = SemanticSettings(SemanticConfig(), EmbeddingConfig(
+        settings = SemanticSettings(CoherentSemanticConfig(), EmbeddingConfig(
             model_id=f"Qwen/Qwen3-Embedding-{size}", revision=revision, device="cpu"))
         provider = SyntheticProvider(settings.embedding)
         if not index:

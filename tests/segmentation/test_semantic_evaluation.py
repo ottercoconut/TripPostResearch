@@ -9,7 +9,7 @@ import pytest
 
 from tourism_ugc_study.segmentation.config import ResearchInput
 from tourism_ugc_study.segmentation.semantic_config import (
-    EmbeddingConfig, SemanticConfig, SemanticSettings, validate_identity_settings,
+    EmbeddingConfig, CoherentSemanticConfig, SemanticSettings, validate_identity_settings,
 )
 from tourism_ugc_study.segmentation.semantic_evaluation import (
     load_development_members, prepare_development_sample,
@@ -78,7 +78,7 @@ def make_source(tmp_path: Path) -> ResearchInput:
 
 
 def settings():
-    return SemanticSettings(SemanticConfig(), EmbeddingConfig())
+    return SemanticSettings(CoherentSemanticConfig(), EmbeddingConfig())
 
 
 def test_development_sampling_is_reproducible_readonly_and_contains_longest(tmp_path):

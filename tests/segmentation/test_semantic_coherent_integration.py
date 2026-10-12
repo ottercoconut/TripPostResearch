@@ -13,9 +13,9 @@ import pytest
 
 from test_semantic_api import SyntheticProvider
 from test_semantic_batch import make_input, read_rows
-from test_semantic_dispatch import CharacterCounter, assert_final_consistency, make_units
-from test_semantic_structured_integration import _provider
 from tourism_ugc_study.segmentation import embedding, semantic_batch, semantic_runtime
+from tourism_ugc_study.segmentation.contracts import TextUnit
+from tourism_ugc_study.segmentation.integrity import validate
 from tourism_ugc_study.segmentation.database_audit import verify_segment_bundle
 from tourism_ugc_study.segmentation.import_validation import validate_run_manifest
 from tourism_ugc_study.segmentation.importer import import_segmentation_run
@@ -24,13 +24,51 @@ from tourism_ugc_study.segmentation.semantic_boundaries import choose_boundaries
 from tourism_ugc_study.segmentation.semantic_comparison import compare_semantic_configs
 from tourism_ugc_study.segmentation.semantic_config import (
     COHERENT_IMPLEMENTATION_VERSION, COHERENT_RULE_VERSION, CoherentSemanticConfig,
-    EmbeddingConfig, SemanticConfig, SemanticSettings, load_semantic_settings,
+    EmbeddingConfig, SemanticSettings, load_semantic_settings,
     parse_algorithm_config, parse_semantic_settings, semantic_rule_identity,
 )
 from tourism_ugc_study.segmentation.semantic_dispatch import choose_semantic_boundaries
 from tourism_ugc_study.segmentation.semantic_evaluation import prepare_development_sample
 from tourism_ugc_study.segmentation.semantic_meaning import partition_by_meaning
 from tourism_ugc_study.segmentation.source import file_sha256
+
+
+class CharacterCounter:
+    """每码点计一token，用于精确验证合成跨度。"""
+
+    def count(self, text):
+        """不截断原文。"""
+        return len(text)
+
+
+def make_units(parts, separator=""):
+    """生成覆盖合成正文的原坐标候选。"""
+    text = separator.join(parts)
+    units, cursor = [], 0
+    for part in parts:
+        units.append(TextUnit(cursor, cursor + len(part), len(part)))
+        cursor += len(part) + len(separator)
+    return text, tuple(units)
+
+
+def assert_final_consistency(text, units, output):
+    """从真实片段端点检查计数、候选标记与决策一致。"""
+    validate(text, [asdict(segment) for segment in output.segments])
+    selected = set(output.decision.semantic_boundaries) | set(output.decision.length_boundaries)
+    assert not set(output.decision.semantic_boundaries) & set(output.decision.length_boundaries)
+    assert [units[index].end for index in sorted(selected)] == [segment.end for segment in output.segments[:-1]]
+    assert {gap.index for gap in output.decision.gaps if gap.selected} == selected
+    assert len(output.decision.gaps) == max(0, len(units) - 1)
+
+
+def _provider(settings):
+    """提供发布测试所需的合成资产身份，不加载权重。"""
+    provider = SyntheticProvider(settings.embedding)
+    provider.identity["assets_sha256"] = {name: "a" * 64 for name in (
+        "config.json", "tokenizer.json", "tokenizer_config.json", "vocab.json", "merges.txt", "model.safetensors")}
+    provider.identity["dependencies"] = {name: "synthetic" for name in (
+        "torch", "transformers", "tokenizers", "huggingface-hub", "numpy")}
+    return provider
 
 
 PARTS = ["📅Day1 河岸漫游", "展馆→书屋", "✅展馆", "展厅介绍了河岸历史和往来船只的故事。",
@@ -53,7 +91,6 @@ def test_frozen_config_has_explicit_identity_and_exact_adopted_parameters():
     assert semantic_rule_identity(settings.algorithm) == (COHERENT_RULE_VERSION, COHERENT_IMPLEMENTATION_VERSION)
     assert parse_semantic_settings(asdict(settings)) == settings
     assert parse_algorithm_config(asdict(settings.algorithm), require_complete=True) == settings.algorithm
-    assert type(parse_algorithm_config(asdict(SemanticConfig()))) is SemanticConfig
     assert settings.embedding.model_id == "Qwen/Qwen3-Embedding-8B"
     assert settings.embedding.revision == "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af"
     assert (settings.embedding.device, settings.embedding.dtype, settings.embedding.batch_size) == ("cuda", "bfloat16", 1)
@@ -89,7 +126,6 @@ def test_dispatch_keeps_original_partition_and_deduplicates_structural_semantic_
     assert actual.meaning_trace.semantic_boundaries == ((5,) if overlapping else ())
     assert actual.meaning_trace.initial_decision == initial
     assert actual.meaning_trace.gap_decisions == expected.gap_decisions
-    assert actual.structure_trace is None
     assert_final_consistency(text, units, actual)
 
 
@@ -100,7 +136,7 @@ def test_coherent_api_short_paths_skip_forward_and_keep_meaning_evidence(body, s
     output = segment_body_semantic(body, provider=provider, token_counter=provider, config=CoherentSemanticConfig())
     assert output.result.status == "completed" and output.decision.status == status
     assert output.model_call_count == 0 and output.meaning_trace is not None
-    assert output.meaning_trace.gap_decisions == () and output.structure_trace is None
+    assert output.meaning_trace.gap_decisions == ()
     assert output.summary()["selected_boundary_count"] == 0
 
 
@@ -110,7 +146,7 @@ def test_coherent_api_failed_projection_has_no_partial_meaning_result():
     output = segment_body_semantic('{"ops":broken}', provider=provider, token_counter=provider,
                                     config=CoherentSemanticConfig())
     assert output.result.status == "failed" and output.result.text_segments is None
-    assert output.meaning_trace is None and output.structure_trace is None
+    assert output.meaning_trace is None
     assert provider.model_call_count == 0
 
 
@@ -147,7 +183,8 @@ def test_coherent_batch_imports_same_table_without_source_writes(tmp_path):
     """实际完整运行可走既有单表发布门；这里只写隔离测试库。"""
     source = make_input(tmp_path, rows=[(1, "\n".join(PARTS), "keep"), (2, None, "keep")])
     before = (file_sha256(source.source_db), file_sha256(source.membership_db))
-    settings, run = _settings(), tmp_path / "run"
+    settings = load_semantic_settings(Path(__file__).resolve().parents[2] / "configs/text-segmentation-semantic-8b-coherent.json")
+    run = tmp_path / "run"
     manifest = semantic_batch.run_semantic_batch(source, run, settings=settings, code_version="synthetic-coherent",
                                                  provider=_provider(settings))
     validate_run_manifest(manifest)
@@ -197,7 +234,7 @@ def coherent_replay(tmp_path, monkeypatch):
     settings, members_dir, run = _settings(), tmp_path / "members", tmp_path / "run"
     provider = _provider(settings)
     members = prepare_development_sample(source, members_dir,
-        settings=replace(settings, algorithm=SemanticConfig()), per_bucket=1, counter=provider)
+        settings=replace(settings, algorithm=CoherentSemanticConfig()), per_bucket=1, counter=provider)
     semantic_batch.run_semantic_batch(source, run, settings=settings, code_version="synthetic-replay",
         provider=provider, post_ids=tuple(members["post_ids"]), seed=members["seed"], members_path=members_dir / "manifest.json")
     cache = tmp_path / ".semantic-vector-cache"

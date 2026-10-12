@@ -27,16 +27,16 @@ def _forbid_model(*args, **kwargs):
 
 def _perturb_replay(monkeypatch, change):
     """模拟另一BLAS的计算结果，不改原trace或持久缓存。"""
-    original = semantic_comparison._boundary_result
+    original = semantic_comparison._boundary_calculation
 
     def calculate(*args, **kwargs):
-        segments, decision, elapsed = original(*args, **kwargs)
+        segments, decision, elapsed, meaning = original(*args, **kwargs)
         decision = deepcopy(decision)
         if decision['gaps']:
             change(decision, segments)
-        return segments, decision, elapsed
+        return segments, decision, elapsed, meaning
 
-    monkeypatch.setattr(semantic_comparison, '_boundary_result', calculate)
+    monkeypatch.setattr(semantic_comparison, '_boundary_calculation', calculate)
 
 
 def _roundoff(decision, segments):

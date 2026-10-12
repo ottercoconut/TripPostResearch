@@ -263,9 +263,9 @@ def test_research_cli_never_prints_runtime_exception_text(tmp_path, monkeypatch,
 
 @pytest.mark.parametrize("structured", [False, True])
 def test_research_cli_rejects_retired_generation_before_reading_source(tmp_path, monkeypatch, capsys, structured):
-    """旧身份只作兼容核验；新生成入口在接触正文与模型前拒绝旧规则。"""
+    """旧格式与旧身份均拒绝，在接触正文与模型之前终止。"""
     from tourism_ugc_study.segmentation.semantic_config import (
-        EmbeddingConfig, SemanticConfig, SemanticSettings, StructuredSemanticConfig,
+        EmbeddingConfig, CoherentSemanticConfig, SemanticSettings,
     )
     root = Path(semantic_runtime.__file__).resolve().parents[3]
     spec = importlib.util.spec_from_file_location("retired_research_cli_test", root / "scripts/text_segment_research.py")
@@ -275,9 +275,13 @@ def test_research_cli_rejects_retired_generation_before_reading_source(tmp_path,
         raise AssertionError("retired rule must fail before corpus or model access")
     monkeypatch.setattr(cli, "load_research_input", forbidden)
     monkeypatch.setattr(semantic_runtime, "run_guarded_semantic_batch", forbidden)
-    algorithm = StructuredSemanticConfig() if structured else SemanticConfig()
+    algorithm = asdict(CoherentSemanticConfig())
+    if structured:
+        algorithm["rule_version"] = "semantic-depth-ugc-0.2"
+    else:
+        algorithm.pop("rule_version")
     config = tmp_path / "historical.json"
-    config.write_text(json.dumps(asdict(SemanticSettings(algorithm, EmbeddingConfig()))))
+    config.write_text(json.dumps({"algorithm": algorithm, "embedding": asdict(EmbeddingConfig())}))
     monkeypatch.setattr(sys, "argv", ["text_segment_research.py", "--output", str(tmp_path / "output"),
                                      "--algorithm-config", str(config)])
     assert cli.main() == 1

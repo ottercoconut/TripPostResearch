@@ -13,10 +13,6 @@ import math
 from pathlib import Path
 import re
 
-RULE_VERSION = "semantic-depth-ugc-0.1"
-IMPLEMENTATION_VERSION = "semantic-depth-ugc-0.1-original-1"
-STRUCTURED_RULE_VERSION = "semantic-depth-ugc-0.2"
-STRUCTURED_IMPLEMENTATION_VERSION = "semantic-depth-ugc-0.2-structure-global-1"
 COHERENT_RULE_VERSION = "semantic-coherent-ugc-1.0"
 COHERENT_IMPLEMENTATION_VERSION = "semantic-coherent-ugc-1.0-meaning-v4-1"
 COHERENT_PARTITION_ID = "experimental-meaning-units-4"
@@ -30,9 +26,7 @@ def validate_semantic_rule_identity(manifest: dict) -> None:
     本门不检查开发／全量范围，也不打开文件或加载模型；开发运行核验及跨模型
     汇总均可复用。缺失、未知或错配的身份抛 ValueError，不能静默解释为当前规则。
     """
-    registered = ((RULE_VERSION, IMPLEMENTATION_VERSION),
-                  (STRUCTURED_RULE_VERSION, STRUCTURED_IMPLEMENTATION_VERSION),
-                  (COHERENT_RULE_VERSION, COHERENT_IMPLEMENTATION_VERSION))
+    registered = ((COHERENT_RULE_VERSION, COHERENT_IMPLEMENTATION_VERSION),)
     if not isinstance(manifest, dict):
         raise ValueError("semantic_rule_identity_mismatch")
     identity = (manifest.get("rule_version"), manifest.get("implementation_version"))
@@ -48,7 +42,7 @@ def validate_semantic_rule_identity(manifest: dict) -> None:
 
 
 @dataclass(frozen=True)
-class SemanticConfig:
+class CoherentSemanticConfig:
     """边界计算与候选单元参数；任何非法值在模型运行之前拒绝。
 
     token限制约束正文，模型输入含模板上限由EmbeddingConfig约束。
@@ -56,17 +50,20 @@ class SemanticConfig:
     """
 
     unit_max_tokens: int = 64
-    window_tokens: int = 64
+    window_tokens: int = 32
     absolute_cohesion_threshold: float = 0.55
-    depth_floor: float = 0.15
+    depth_floor: float = 0.05
     depth_std_factor: float = 0.5
-    min_segment_nonspace_chars: int = 12
-    max_segment_tokens: int = 384
+    min_segment_nonspace_chars: int = 16
+    max_segment_tokens: int = 512
     epsilon: float = 1e-6
     smoothing: int = 0
+    rule_version: str = COHERENT_RULE_VERSION
 
     def __post_init__(self) -> None:
-        """拒绝bool伪装整数、非有限阈值和无意义的长度组合。"""
+        """拒绝旧身份、bool伪装整数、非有限阈值和无意义的长度组合。"""
+        if self.rule_version != COHERENT_RULE_VERSION:
+            raise ValueError("unknown_semantic_rule_version")
         for name in ("unit_max_tokens", "window_tokens", "min_segment_nonspace_chars", "max_segment_tokens"):
             value = getattr(self, name)
             if type(value) is not int or value < 1:
@@ -85,89 +82,28 @@ class SemanticConfig:
             raise ValueError("smoothing_not_supported")
 
 
-@dataclass(frozen=True)
-class StructuredSemanticConfig(SemanticConfig):
-    """显式启用0.2开发规则；不向旧配置增加字段或改变历史指纹。
+def parse_algorithm_config(raw: object, require_complete: bool = False) -> CoherentSemanticConfig:
+    """只解析当前连贯块配置；身份必须显式声明，旧配置直接拒绝。
 
-    继承原有评分和长度参数，结构证据与分区策略另行进入配置摘要。
-    context/global仅在调用者选择本类或声明0.2时成为默认值，不能据模型
-    大小或缺失字段把历史0.1配置升级。登记算法身份不等于科研质量已通过。
-    """
-
-    rule_version: str = STRUCTURED_RULE_VERSION
-    structure_mode: str = "context"
-    length_strategy: str = "global"
-
-    def __post_init__(self) -> None:
-        """复用原参数约束，另拒绝未知身份与无法重放的结构／长度策略。"""
-        super().__post_init__()
-        if self.rule_version != STRUCTURED_RULE_VERSION:
-            raise ValueError("unknown_semantic_rule_version")
-        if self.structure_mode not in ("sentence_only", "structure", "blocks", "context"):
-            raise ValueError("unknown_structure_mode")
-        if self.length_strategy not in ("global", "greedy"):
-            raise ValueError("unknown_partition_length_strategy")
-
-
-@dataclass(frozen=True)
-class CoherentSemanticConfig(SemanticConfig):
-    """冻结的完整介绍／推荐块规则；默认参数等于用户采纳的v4运行。
-
-    只新增显式算法身份，不改旧配置字段或指纹。该身份表示采用同一确定性
-    规则，不代表每篇正文质量均经人工确认；参数变化仍进入配置摘要。
-    """
-
-    window_tokens: int = 32
-    depth_floor: float = 0.05
-    min_segment_nonspace_chars: int = 16
-    max_segment_tokens: int = 512
-    rule_version: str = COHERENT_RULE_VERSION
-
-    def __post_init__(self) -> None:
-        """拒绝非法参数及借用其他规则标签，不接受实验策略开关。"""
-        super().__post_init__()
-        if self.rule_version != COHERENT_RULE_VERSION:
-            raise ValueError("unknown_semantic_rule_version")
-
-
-def parse_algorithm_config(raw: object, require_complete: bool = False) -> SemanticConfig:
-    """按显式规则恢复算法配置；旧无版本字段格式始终恢复为0.1。
-
-    普通配置允许省略已声明版本的经验默认值；运行manifest使用
-    require_complete=True要求完整保存该版本全部字段。未知字段、未知版本
-    或把新策略塞入旧配置均抛ValueError，不静默忽略或推断升级。
+    普通调用可省略数值默认项；运行manifest要求保存全部参数。未知字段、
+    缺失或旧身份均抛ValueError，不升级旧实验格式。
     """
     if not isinstance(raw, dict):
         raise ValueError("semantic_config_fields_invalid:algorithm")
-    cls = SemanticConfig
-    if "rule_version" in raw:
-        classes = {STRUCTURED_RULE_VERSION: StructuredSemanticConfig,
-                   COHERENT_RULE_VERSION: CoherentSemanticConfig}
-        if not isinstance(raw["rule_version"], str) or raw["rule_version"] not in classes:
-            raise ValueError("unknown_semantic_rule_version")
-        cls = classes[raw["rule_version"]]
-    fields = set(cls.__dataclass_fields__)
-    if set(raw) - fields or (require_complete and set(raw) != fields):
+    fields = set(CoherentSemanticConfig.__dataclass_fields__)
+    if set(raw) - fields or (require_complete and set(raw) != fields) or "rule_version" not in raw:
         raise ValueError("semantic_config_fields_invalid:algorithm")
-    return cls(**raw)
+    if raw["rule_version"] != COHERENT_RULE_VERSION:
+        raise ValueError("unknown_semantic_rule_version")
+    return CoherentSemanticConfig(**raw)
 
 
-def semantic_rule_identity(config: SemanticConfig) -> tuple[str, str]:
-    """返回已登记配置类的规则／实现配对，同时防御性复验配置。
-
-    仅接受登记的确切类型，避免未登记子类借旧身份携带额外行为。
-    实现身份属于算法；模型身份仍由EmbeddingConfig及provider独立绑定。
-    """
-    if type(config) is SemanticConfig:
-        SemanticConfig.__post_init__(config)
-        return RULE_VERSION, IMPLEMENTATION_VERSION
-    if type(config) is StructuredSemanticConfig:
-        StructuredSemanticConfig.__post_init__(config)
-        return STRUCTURED_RULE_VERSION, STRUCTURED_IMPLEMENTATION_VERSION
-    if type(config) is CoherentSemanticConfig:
-        CoherentSemanticConfig.__post_init__(config)
-        return COHERENT_RULE_VERSION, COHERENT_IMPLEMENTATION_VERSION
-    raise ValueError("invalid_semantic_config_type")
+def semantic_rule_identity(config: CoherentSemanticConfig) -> tuple[str, str]:
+    """验证唯一当前配置的确切类型与参数，返回冻结算法／实现身份。"""
+    if type(config) is not CoherentSemanticConfig:
+        raise ValueError("invalid_semantic_config_type")
+    CoherentSemanticConfig.__post_init__(config)
+    return COHERENT_RULE_VERSION, COHERENT_IMPLEMENTATION_VERSION
 
 
 @dataclass(frozen=True)
@@ -200,7 +136,7 @@ class EmbeddingConfig:
 class SemanticSettings:
     """同一运行的算法与模型声明，实际权重及设备身份另由provider补齐。"""
 
-    algorithm: SemanticConfig
+    algorithm: CoherentSemanticConfig
     embedding: EmbeddingConfig
 
     @property
@@ -213,7 +149,7 @@ def validate_current_frozen_settings(settings: SemanticSettings) -> None:
     """新生成入口只接受用户采纳的完整算法、模型与运行参数组合。
 
     登记摘要独立于外部JSON，修改配置文件不能同时改写核验基准。纯计算、
-    历史读取和实验重放仍可显式参数化，不把该门加入一般配置解析器。
+    纯计算和参数对照仍可显式参数化，不把该门加入一般配置解析器。
     身份、参数或模型漂移均抛ValueError，调用者须在读取正文前执行。
     """
     if (type(settings) is not SemanticSettings

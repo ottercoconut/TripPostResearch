@@ -13,4 +13,4 @@
 
 候选SQLite和原始内容/图片归档位于`data/processed/`；冻结登记为`governance/research-data-freezes.json`。具体根、字节校验及不可变保护见[研究数据冻结与校验](../docs/protocols/研究数据冻结与校验.md)。既有MPS/Runpod取消尝试的推理产物已经销毁，不恢复、不混入本轮；其他历史训练/人工证据仍保留。
 
-切分算法的活跃复现包为 `semantic-coherent-freeze-20261012-01/`，原展示／复核保留在 `semantic-coherent-blocks-20261012-01/`。旧试验入口、旧配置与运行副本已按逐文件SHA校验后收入 `segmentation-archive-20261012-01/archive.tar.gz`，索引为同目录 `inventory.json`；旧路径即归档成员名。当前输入包与NAS来源核验保留，复现不再依赖已清理目录。采纳范围及后续事项只在[总备忘录B05](../docs/planning/研究问题与待办总备忘录.md#b05embedding自然语义分段与工程接入)维护。
+切分算法的活跃复现包为 `semantic-coherent-freeze-20261012-01/`，原展示／复核已集中到冻结包的 `evidence/`。旧试验入口、旧配置与运行副本已按逐文件SHA校验后收入 `segmentation-archive-20261012-01/archive.tar.gz`，索引为同目录 `inventory.json`；旧路径即归档成员名。当前输入包与NAS来源核验保留，复现不再依赖已清理目录。采纳范围及后续事项只在[总备忘录B05](../docs/planning/研究问题与待办总备忘录.md#b05embedding自然语义分段与工程接入)维护。

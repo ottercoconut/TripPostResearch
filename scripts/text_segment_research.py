@@ -29,7 +29,7 @@ def main() -> int:
     parser.add_argument("--load-timeout", type=float, default=300, help="语义模型加载预算秒数，默认300")
     parser.add_argument("--post-timeout", type=float, default=1800, help="语义完整单帖预算秒数，默认1800")
     parser.add_argument("--total-timeout", type=float, default=14400, help="语义整轮预算秒数，默认14400")
-    parser.add_argument("--resource-policy", type=Path, help="Linux/CUDA显式资源门JSON；Mac旧路径省略")
+    parser.add_argument("--resource-policy", type=Path, help="Linux/CUDA显式资源门JSON")
     parser.add_argument("--code-version", help="显式非空来源描述并跳过Git；实际执行身份始终由code_snapshot.sha256绑定")
     args = parser.parse_args()
     if args.frozen_input and (args.config is not None or args.members is not None):
@@ -41,8 +41,7 @@ def main() -> int:
             CoherentSemanticConfig, load_semantic_settings, validate_current_frozen_settings,
         )
         settings = load_semantic_settings(args.algorithm_config)
-        # 历史配置仍可由核验／重放工具读取；新批次不能误用已退役生成规则。
-        # 在读取正文或加载模型前拒绝，避免错误配置产生新的旧算法结果。
+        # 唯一当前配置须匹配完整冻结指纹；在读取正文或加载模型前拒绝漂移。
         if type(settings.algorithm) is not CoherentSemanticConfig:
             raise ValueError("retired_algorithm_for_new_run")
         validate_current_frozen_settings(settings)

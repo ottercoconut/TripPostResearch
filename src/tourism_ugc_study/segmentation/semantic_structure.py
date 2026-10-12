@@ -1,10 +1,8 @@
-"""为既有候选 gap 提取可消融的正文结构证据，不决定最终切点。
+"""提取当前连贯块算法使用的结构证据，不决定最终切点。
 
-本模块是独立开发候选，不接入现行语义规则的默认路径。输入仍为原文与
-候选单元；输出与相邻单元 gap 一一对应，不改写原文、不拆合单元、不访问
-帖子 ID、模型或数据库。罚分只表达结构风险的经验优先级，不是概率或金标。
-下游可比较 sentence_only 与 structure，或按 reason 单独消融；硬长度不可
-满足时须由下游显式记录退让，不能把本模块的软证据当作无限制禁止切分。
+输入为原文与候选单元，输出与gap一一对应；不改写原文、不拆合单元，
+不访问帖子ID、模型或数据库。经验罚分表达结构风险，不是概率或质量金标。
+硬长度不可满足时由分区器显式记录退让。
 """
 
 from __future__ import annotations
@@ -12,15 +10,13 @@ from __future__ import annotations
 from bisect import bisect_right
 from dataclasses import dataclass
 import re
-from typing import Literal, Sequence
+from typing import Sequence
 import unicodedata
 
 import regex
 
 from .contracts import TextUnit
 from .integrity import WHITE
-
-StructureMode = Literal["sentence_only", "structure"]
 
 _STRONG = frozenset("。！？；!?;")
 _CLOSERS = frozenset("”’」』)）】]》〉\"'")
@@ -642,21 +638,19 @@ def _sentence_end(value: str) -> bool:
 
 
 def analyze_gap_structure(
-    text: str, units: Sequence[TextUnit], *, mode: StructureMode = "structure",
+    text: str, units: Sequence[TextUnit],
 ) -> tuple[GapStructure, ...]:
     """返回每个既有 gap 的结构证据，供边界候选独立比较。
 
-    sentence_only 仅区分句／行端点和单元内细分点；structure 另观察已配对
-    括号、左侧短题头、右侧属性行和右侧题头。基础句内罚分为 8；配对括号
+    区分句／行端点和单元内细分点，并观察已配对括号、左侧短题头、
+    右侧属性行和右侧题头。基础句内罚分为 8；配对括号
     内另加 12，题头后另加 6，属性行前另加 6。罚分可累加但不是概率，
     不蕴含任何默认正式规则或段数目标。输入非法时抛稳定 reason code，
     空白输入配空单元返回空元组；N=1 仍校验覆盖后返回空元组。
     """
-    if not isinstance(mode, str) or mode not in {"sentence_only", "structure"}:
-        raise ValueError("invalid_structure_mode")
     _validate_spans(text, units)
     line_starts = (0, *(match.end() for match in _LINES.finditer(text)))
-    pairs = _matched_brackets(text) if mode == "structure" else ()
+    pairs = _matched_brackets(text)
 
     def starts_line(unit: TextUnit) -> bool:
         """缩进空白不妨碍行首；句中 emoji 不冒充一行题头。"""
@@ -673,24 +667,23 @@ def analyze_gap_structure(
         reasons = ["line_end" if line else "sentence_end" if sentence else "unit_internal"]
         evidence = [(reasons[0], left.end, right.start)]
         penalty = 0 if line or sentence else 8
-        if mode == "structure":
-            for start, end in pairs:
-                if start < left.end < end:
-                    reasons.append("inside_matched_bracket")
-                    evidence.append(("inside_matched_bracket", start, end))
-            if "inside_matched_bracket" in reasons:
-                penalty += 12
-            if headings[index]:
-                reasons.append("after_heading")
-                evidence.append(("after_heading", left.start, left.end))
-                penalty += 6
-            if attributes[index + 1]:
-                reasons.append("before_attribute_line")
-                evidence.append(("before_attribute_line", right.start, right.end))
-                penalty += 6
-            if headings[index + 1]:
-                reasons.append("before_heading")
-                evidence.append(("before_heading", right.start, right.end))
+        for start, end in pairs:
+            if start < left.end < end:
+                reasons.append("inside_matched_bracket")
+                evidence.append(("inside_matched_bracket", start, end))
+        if "inside_matched_bracket" in reasons:
+            penalty += 12
+        if headings[index]:
+            reasons.append("after_heading")
+            evidence.append(("after_heading", left.start, left.end))
+            penalty += 6
+        if attributes[index + 1]:
+            reasons.append("before_attribute_line")
+            evidence.append(("before_attribute_line", right.start, right.end))
+            penalty += 6
+        if headings[index + 1]:
+            reasons.append("before_heading")
+            evidence.append(("before_heading", right.start, right.end))
         output.append(GapStructure(index=index, boundary_kind=kind, natural_boundary=line or sentence,
                                    penalty=penalty, reasons=tuple(dict.fromkeys(reasons)),
                                    evidence_spans=tuple(evidence)))

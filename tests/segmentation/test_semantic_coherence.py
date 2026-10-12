@@ -120,7 +120,7 @@ def test_multiday_route_overview_and_wrapped_routes_share_one_parent():
 def test_multiday_route_overview_rejects_all_optional_semantic_cuts():
     """整份目录的保护不能依赖某组旧分数恰巧不提名日序之间的gap。"""
     from tourism_ugc_study.segmentation.contracts import GapScore, SemanticDecision
-    from tourism_ugc_study.segmentation.semantic_config import SemanticConfig
+    from tourism_ugc_study.segmentation.semantic_config import CoherentSemanticConfig
     from tourism_ugc_study.segmentation.semantic_meaning import partition_by_meaning
 
     class Counter:
@@ -138,7 +138,7 @@ def test_multiday_route_overview_rejects_all_optional_semantic_cuts():
     selected = tuple(range(len(units) - 1))
     gaps = tuple(GapScore(i, 0.1, 0.5, True, True, "synthetic_selected") for i in selected)
     decision = SemanticDecision("scored_split", (), gaps, selected, ())
-    config = SemanticConfig(min_segment_nonspace_chars=1, max_segment_tokens=512)
+    config = CoherentSemanticConfig(min_segment_nonspace_chars=1, max_segment_tokens=512)
     result = partition_by_meaning(text, units, decision, config, Counter())
     assert len(result.segments) == 1 and result.segments[0].raw_text == text
     assert result.semantic_boundaries == result.structural_boundaries == ()

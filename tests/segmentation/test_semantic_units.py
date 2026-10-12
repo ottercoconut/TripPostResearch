@@ -7,7 +7,7 @@ import pytest
 import regex
 
 from tourism_ugc_study.segmentation.integrity import WHITE
-from tourism_ugc_study.segmentation.semantic_config import SemanticConfig
+from tourism_ugc_study.segmentation.semantic_config import CoherentSemanticConfig
 from tourism_ugc_study.segmentation.semantic_units import build_units
 
 
@@ -31,7 +31,7 @@ class CodepointCounter:
 
 def _parts(text, *, counter=None, config=None):
     """每个场景同时校验独立的非空白覆盖与完整字素端点。"""
-    result = build_units(text, counter or CodepointCounter(), config or SemanticConfig())
+    result = build_units(text, counter or CodepointCounter(), config or CoherentSemanticConfig())
     boundaries = {0, *(match.end() for match in regex.finditer(r"\X", text))}
     covered = [0] * len(text)
     previous_end = 0
@@ -75,13 +75,13 @@ def test_sentence_and_grapheme_contract(text, expected):
 
 def test_repeated_sentences_have_distinct_positions():
     """重复句必须由扫描获得各自位置，不能 str.find 回到第一次。"""
-    result = build_units("重复。重复。", CodepointCounter(), SemanticConfig())
+    result = build_units("重复。重复。", CodepointCounter(), CoherentSemanticConfig())
     assert [(unit.start, unit.end) for unit in result.units] == [(0, 3), (3, 6)]
 
 
 def test_weak_boundary_precedes_token_offset_fallback():
     """超限时优先选上限内最靠后的弱边界，余下无标点再按 offset。"""
-    config = SemanticConfig(unit_max_tokens=4)
+    config = CoherentSemanticConfig(unit_max_tokens=4)
     assert _parts("甲乙，丙丁戊己庚", config=config) == ["甲乙，", "丙丁戊己", "庚"]
     assert _parts("甲 乙 丙丁戊己", config=config) == ["甲 乙", "丙丁戊己"]
 
@@ -92,7 +92,7 @@ def test_nonmonotone_prefix_counts_are_not_binary_searched():
         def count(self, text):
             return {"甲，乙，": 5, "甲，乙，丙，": 2}.get(text, len(text))
 
-    assert _parts("甲，乙，丙，丁", counter=NonmonotoneCounter(), config=SemanticConfig(unit_max_tokens=3)) == ["甲，乙，丙，", "丁"]
+    assert _parts("甲，乙，丙，丁", counter=NonmonotoneCounter(), config=CoherentSemanticConfig(unit_max_tokens=3)) == ["甲，乙，丙，", "丁"]
 
 
 def test_offset_suggestion_is_recounted_then_backed_off():
@@ -101,12 +101,12 @@ def test_offset_suggestion_is_recounted_then_backed_off():
         def count(self, text):
             return 3 if text == "ab" else len(text)
 
-    assert _parts("abcdef", counter=PrefixCounter(), config=SemanticConfig(unit_max_tokens=2)) == ["a", "bc", "de", "f"]
+    assert _parts("abcdef", counter=PrefixCounter(), config=CoherentSemanticConfig(unit_max_tokens=2)) == ["a", "bc", "de", "f"]
 
 
 def test_symbol_and_url_runs_obey_unit_limit():
     """纯符号和超长URL不享受结构保护，也不能拆后再次合回超长块。"""
-    config = SemanticConfig(unit_max_tokens=4)
+    config = CoherentSemanticConfig(unit_max_tokens=4)
     assert _parts("++++++++++", config=config) == ["++++", "++++", "++"]
     parts = _parts("https://example.test/?x=1234567;y=7654321", config=config)
     assert all(len(part) <= 4 for part in parts)
@@ -116,7 +116,7 @@ def test_oversized_grapheme_is_one_unit_and_records_diagnostic():
     """一个字素可超64正文token，但不可截断，且必须满足两项硬上限。"""
     glyph = "a" + "\u0301" * 70
     text = glyph + "尾声"
-    result = build_units(text, CodepointCounter(), SemanticConfig())
+    result = build_units(text, CodepointCounter(), CoherentSemanticConfig())
     assert [text[unit.start:unit.end] for unit in result.units] == [glyph, "尾声"]
     assert result.diagnostics == ("unit_oversized_grapheme",)
     _parts(text)
@@ -131,7 +131,7 @@ def test_offsets_may_overlap_for_multiple_tokens_of_one_character():
         def count(self, text):
             return 4 if text == "甲乙丙" else len(text)
 
-    assert _parts("甲乙丙", counter=OverlapCounter(), config=SemanticConfig(unit_max_tokens=2)) == ["甲", "乙丙"]
+    assert _parts("甲乙丙", counter=OverlapCounter(), config=CoherentSemanticConfig(unit_max_tokens=2)) == ["甲", "乙丙"]
 
 
 @pytest.mark.parametrize("glyph_tokens,max_input,max_segment,reason", [
@@ -144,7 +144,7 @@ def test_grapheme_limit_failure_order(glyph_tokens, max_input, max_segment, reas
     counter = CodepointCounter()
     counter.max_input_tokens = max_input
     with pytest.raises(ValueError, match=f"^{reason}$"):
-        build_units("a" + "\u0301" * (glyph_tokens - 1), counter, SemanticConfig(max_segment_tokens=max_segment))
+        build_units("a" + "\u0301" * (glyph_tokens - 1), counter, CoherentSemanticConfig(max_segment_tokens=max_segment))
 
 
 def test_every_ordinary_unit_checks_complete_model_input():
@@ -152,7 +152,7 @@ def test_every_ordinary_unit_checks_complete_model_input():
     counter = CodepointCounter()
     counter.max_input_tokens = 11
     with pytest.raises(ValueError, match="^model_input_limit_exceeded$"):
-        build_units("甲乙", counter, SemanticConfig())
+        build_units("甲乙", counter, CoherentSemanticConfig())
 
 
 @pytest.mark.parametrize("bad", [
@@ -170,7 +170,7 @@ def test_invalid_token_offsets_fail_closed(bad):
             return bad
 
     with pytest.raises(ValueError, match="^invalid_token_offsets$"):
-        build_units("甲乙丙丁", BadCounter(), SemanticConfig(unit_max_tokens=2))
+        build_units("甲乙丙丁", BadCounter(), CoherentSemanticConfig(unit_max_tokens=2))
 
 
 def test_missing_offsets_and_tokenizer_exception_do_not_leak_text():
@@ -184,9 +184,9 @@ def test_missing_offsets_and_tokenizer_exception_do_not_leak_text():
             raise RuntimeError("sensitive:" + text)
 
     with pytest.raises(ValueError, match="^token_offsets_unavailable$"):
-        build_units("甲乙丙丁", MissingCounter(), SemanticConfig(unit_max_tokens=2))
+        build_units("甲乙丙丁", MissingCounter(), CoherentSemanticConfig(unit_max_tokens=2))
     with pytest.raises(ValueError, match="^token_count_failed$"):
-        build_units("甲乙丙丁", FailingCounter(), SemanticConfig())
+        build_units("甲乙丙丁", FailingCounter(), CoherentSemanticConfig())
 
 
 def test_pure_units_import_does_not_load_embedding_runtime():

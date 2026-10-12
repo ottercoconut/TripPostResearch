@@ -14,7 +14,7 @@ from tourism_ugc_study.segmentation.semantic_boundaries import (
     _valley_candidates,
     choose_boundaries,
 )
-from tourism_ugc_study.segmentation.semantic_config import SemanticConfig
+from tourism_ugc_study.segmentation.semantic_config import CoherentSemanticConfig
 
 
 class CharacterCounter:
@@ -37,11 +37,11 @@ def make_units(parts, separator=""):
 
 def test_empty_and_single_unit_do_not_need_vectors():
     """短帖退化路径不伪造评分，同时保证原文与码点span正确。"""
-    segments, decision = choose_boundaries(" \r\n", (), None, SemanticConfig(), CharacterCounter())
+    segments, decision = choose_boundaries(" \r\n", (), None, CoherentSemanticConfig(), CharacterCounter())
     assert segments == () and decision.status == "empty" and decision.gaps == ()
     text = "\t海边真好看。\r\n"
     unit = TextUnit(start=1, end=7, token_count=6)
-    segments, decision = choose_boundaries(text, (unit,), None, SemanticConfig(), CharacterCounter())
+    segments, decision = choose_boundaries(text, (unit,), None, CoherentSemanticConfig(), CharacterCounter())
     assert decision.status == "single_unit" and decision.gaps == ()
     assert [(segment.start, segment.end, segment.raw_text) for segment in segments] == [(1, 7, "海边真好看。")]
     validate(text, [asdict(segment) for segment in segments])
@@ -52,7 +52,7 @@ def test_two_units_use_absolute_cohesion_even_without_a_depth_valley(cosine, exp
     """一个gap的深度严格为0，短帖仍可根据已配置的绝对阈值切开。"""
     text, units = make_units(["甲" * 15 + "。", "乙" * 15 + "。"])
     vectors = np.array([[1, 0], [cosine, math.sqrt(1 - cosine ** 2)]])
-    segments, decision = choose_boundaries(text, units, vectors, SemanticConfig(), CharacterCounter())
+    segments, decision = choose_boundaries(text, units, vectors, CoherentSemanticConfig(), CharacterCounter())
     assert decision.status == expected
     assert decision.gaps[0].depth == 0
     assert decision.gaps[0].cohesion == pytest.approx(cosine)
@@ -65,7 +65,7 @@ def test_two_units_use_absolute_cohesion_even_without_a_depth_valley(cosine, exp
 def test_three_units_match_hand_calculated_endpoint_valley():
     """N=3不丢弃端点：c=(0,1/√2)，d=(1/√2,0)，选首gap。"""
     text, units = make_units(["甲" * 16, "乙" * 16, "丙" * 16])
-    segments, decision = choose_boundaries(text, units, [[1, 0], [0, 1], [0, 1]], SemanticConfig(), CharacterCounter())
+    segments, decision = choose_boundaries(text, units, [[1, 0], [0, 1], [0, 1]], CoherentSemanticConfig(), CharacterCounter())
     assert tuple(gap.cohesion for gap in decision.gaps) == pytest.approx((0, 1 / math.sqrt(2)))
     assert tuple(gap.depth for gap in decision.gaps) == pytest.approx((1 / math.sqrt(2), 0))
     assert decision.semantic_boundaries == (0,)
@@ -78,7 +78,7 @@ def test_relative_depth_can_select_a_valley_above_absolute_threshold():
     # 相邻余弦=(0.8,0.2,0.8)，window=1时每侧仅一个单元。
     angles = np.cumsum([0, math.acos(0.8), math.acos(0.2), math.acos(0.8)])
     vectors = np.column_stack((np.cos(angles), np.sin(angles)))
-    config = replace(SemanticConfig(), window_tokens=1, absolute_cohesion_threshold=-1)
+    config = replace(CoherentSemanticConfig(), window_tokens=1, absolute_cohesion_threshold=-1)
     _, decision = choose_boundaries(text, units, vectors, config, CharacterCounter())
     assert tuple(gap.cohesion for gap in decision.gaps) == pytest.approx((0.8, 0.2, 0.8))
     assert tuple(gap.depth for gap in decision.gaps) == pytest.approx((0, 1.2, 0))
@@ -89,7 +89,7 @@ def test_relative_depth_can_select_a_valley_above_absolute_threshold():
 def test_short_fragments_are_suppressed_without_removing_punctuation():
     """两个很短单元可以评分，但最小长度保护会保留整帖与全部标点。"""
     text, units = make_units(["好看！", "方便！"])
-    segments, decision = choose_boundaries(text, units, [[1, 0], [0, 1]], SemanticConfig(), CharacterCounter())
+    segments, decision = choose_boundaries(text, units, [[1, 0], [0, 1]], CoherentSemanticConfig(), CharacterCounter())
     assert len(segments) == 1 and segments[0].raw_text == text
     assert decision.status == "scored_keep"
     assert decision.gaps[0].reason == "min_segment_nonspace_chars"
@@ -99,7 +99,7 @@ def test_short_fragments_are_suppressed_without_removing_punctuation():
 def test_shortness_is_checked_against_already_accepted_neighbours():
     """两个强候选间只有6字时只接受一个，避免后续边界把现有段切碎。"""
     text, units = make_units(["甲" * 12, "乙" * 3, "丙" * 3, "丁" * 12])
-    config = replace(SemanticConfig(), window_tokens=1)
+    config = replace(CoherentSemanticConfig(), window_tokens=1, min_segment_nonspace_chars=12)
     segments, decision = choose_boundaries(text, units, [[1, 0], [0, 1], [0, 1], [1, 0]], config, CharacterCounter())
     assert decision.semantic_boundaries == (0,)
     assert decision.gaps[2].reason == "min_segment_nonspace_chars"
@@ -135,7 +135,7 @@ def test_epsilon_ties_use_transitive_anchored_groups_then_document_position():
 def test_identical_vectors_have_no_semantic_cuts_but_can_require_length_cuts():
     """平坦高相似度不会强造语义边界，硬上限另行标记并在同分时靠后切。"""
     text, units = make_units([char * 16 for char in "甲乙丙丁戊己"])
-    config = replace(SemanticConfig(), unit_max_tokens=16, max_segment_tokens=32)
+    config = replace(CoherentSemanticConfig(), unit_max_tokens=16, max_segment_tokens=32)
     segments, decision = choose_boundaries(text, units, np.ones((6, 3)), config, CharacterCounter())
     assert decision.semantic_boundaries == () and decision.length_boundaries == (1, 3)
     assert decision.status == "length_split"
@@ -157,7 +157,7 @@ def test_exact_span_count_does_not_assume_additivity_or_monotonic_prefix_counts(
 
     text, units = make_units([char * 12 for char in "甲乙丙丁"])
     units = tuple(replace(unit, token_count=2) for unit in units)
-    config = replace(SemanticConfig(), unit_max_tokens=2, max_segment_tokens=6)
+    config = replace(CoherentSemanticConfig(), unit_max_tokens=2, max_segment_tokens=6)
     segments, decision = choose_boundaries(text, units, np.ones((4, 2)), config, NonMonotonicCounter())
     assert decision.length_boundaries == (2,)
     assert [len(segment.raw_text) for segment in segments] == [36, 12]
@@ -167,7 +167,7 @@ def test_exact_span_count_does_not_assume_additivity_or_monotonic_prefix_counts(
 def test_length_limit_can_allow_a_short_tail_and_records_it():
     """无法同时满足最小段长时优先硬上限，结果仍无损且明确记录短尾。"""
     text, units = make_units(["甲" * 12, "乙" * 3, "丙" * 3])
-    config = replace(SemanticConfig(), unit_max_tokens=12, max_segment_tokens=12)
+    config = replace(CoherentSemanticConfig(), unit_max_tokens=12, max_segment_tokens=12)
     segments, decision = choose_boundaries(text, units, np.ones((3, 2)), config, CharacterCounter())
     assert decision.length_boundaries == (0,)
     assert [len(segment.raw_text) for segment in segments] == [12, 6]
@@ -177,7 +177,7 @@ def test_length_limit_can_allow_a_short_tail_and_records_it():
 def test_single_unit_over_hard_limit_fails_without_truncating():
     """没有可行单元边界时明确失败，单单元路径不能绕过硬上限。"""
     text, units = make_units(["甲" * 65])
-    config = replace(SemanticConfig(), max_segment_tokens=64)
+    config = replace(CoherentSemanticConfig(), max_segment_tokens=64)
     with pytest.raises(ValueError, match="^unsplittable_segment_limit$"):
         choose_boundaries(text, units, None, config, CharacterCounter())
 
@@ -198,14 +198,14 @@ def test_invalid_vectors_fail_instead_of_silently_scoring(vectors, error):
     """行数、维度、有限性与范数均为算法入口契约。"""
     text, units = make_units(["甲" * 12, "乙" * 12])
     with pytest.raises(ValueError, match=f"^{error}$"):
-        choose_boundaries(text, units, vectors, SemanticConfig(), CharacterCounter())
+        choose_boundaries(text, units, vectors, CoherentSemanticConfig(), CharacterCounter())
 
 
 def test_cancelled_window_mean_fails_even_when_every_unit_vector_is_valid():
     """两个反向有效向量的均值为零，不能伪造低相似度切点。"""
     text, units = make_units([char * 16 for char in "甲乙丙"])
     with pytest.raises(ValueError, match="^invalid_window_vector$"):
-        choose_boundaries(text, units, [[1, 0], [-1, 0], [0, 1]], SemanticConfig(), CharacterCounter())
+        choose_boundaries(text, units, [[1, 0], [-1, 0], [0, 1]], CoherentSemanticConfig(), CharacterCounter())
 
 
 def test_repeat_text_emoji_spaces_and_feff_preserve_offsets():
@@ -213,7 +213,7 @@ def test_repeat_text_emoji_spaces_and_feff_preserve_offsets():
     parts = ["👨‍👩‍👧‍👦出游真开心真开心。", "👨‍👩‍👧‍👦出游真开心真开心。", "\ufeff换乘公交前往不同地点。"]
     text, units = make_units(parts, separator="\r\n \t")
     vectors = [[1, 0], [1, 0], [0, 1]]
-    segments, decision = choose_boundaries(text, units, vectors, SemanticConfig(), CharacterCounter())
+    segments, decision = choose_boundaries(text, units, vectors, CoherentSemanticConfig(window_tokens=64, min_segment_nonspace_chars=12), CharacterCounter())
     validate(text, [asdict(segment) for segment in segments])
     assert "\r\n \t" in segments[0].raw_text
     assert segments[-1].raw_text.startswith("\ufeff")
@@ -233,12 +233,12 @@ def test_repeat_text_emoji_spaces_and_feff_preserve_offsets():
 def test_invalid_units_fail_even_when_vectors_would_be_skipped(text, units, error):
     """任何缺字、重叠或字素拆坏在N=0/1时也不能成为成功结果。"""
     with pytest.raises(ValueError, match=f"^{error}$"):
-        choose_boundaries(text, units, None, SemanticConfig(), CharacterCounter())
+        choose_boundaries(text, units, None, CoherentSemanticConfig(), CharacterCounter())
 
 
 def test_invalid_window_budget_is_rejected_even_on_empty_input():
     """即使外部绕过冻结配置构造，纯函数仍拒绝零窗口预算。"""
-    config = SemanticConfig()
+    config = CoherentSemanticConfig()
     object.__setattr__(config, "window_tokens", 0)
     with pytest.raises(ValueError, match="^invalid_algorithm_parameter:window_tokens$"):
         choose_boundaries("", (), None, config, CharacterCounter())
@@ -250,7 +250,7 @@ def test_replay_is_exactly_deterministic_and_does_not_modify_vectors():
     rng = np.random.default_rng(20261011)
     vectors = rng.normal(size=(10, 12))
     before = vectors.copy()
-    config = replace(SemanticConfig(), max_segment_tokens=64)
+    config = replace(CoherentSemanticConfig(), max_segment_tokens=64)
     first = choose_boundaries(text, units, vectors, config, CharacterCounter())
     second = choose_boundaries(text, units, vectors, config, CharacterCounter())
     assert first == second

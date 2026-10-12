@@ -19,15 +19,14 @@ import sys
 import time
 
 from .artifacts import canonical_json, new_run_directory, write_json
-from .batch import runtime_identity
+from .artifacts import runtime_identity
 from .config import ResearchInput
 from .contracts import EmbeddingError, SemanticDecision, TextUnit
 from .embedding import QwenTokenCounter, identity_sha256
 from .embedding_cache import EmbeddingCache
 from .integrity import WHITE, validate
 from .semantic_dispatch import choose_semantic_boundaries
-from .semantic_config import (CoherentSemanticConfig, SemanticConfig, SemanticSettings,
-                              StructuredSemanticConfig, parse_semantic_settings)
+from .semantic_config import CoherentSemanticConfig, SemanticSettings, parse_semantic_settings
 from .semantic_development_input import FrozenDevelopmentInput
 from .semantic_evaluation import (validate_counter_settings, validate_development_run,
                                   validate_development_units)
@@ -95,12 +94,12 @@ def _baseline_decision_replay(original: dict, replayed: dict) -> dict:
             "max_absolute_delta": max(maxima.values())}
 
 
-def _select_configs(baseline: SemanticConfig, configs: tuple[SemanticConfig, ...] | None) -> tuple[SemanticConfig, ...]:
+def _select_configs(baseline: CoherentSemanticConfig, configs: tuple[CoherentSemanticConfig, ...] | None) -> tuple[CoherentSemanticConfig, ...]:
     """限制预先声明的最多九组预算，拒绝单位或其他固定算法参数漂移。"""
     result = configs if configs is not None else tuple(
         replace(baseline, window_tokens=window, absolute_cohesion_threshold=threshold)
         for window in (32, 64, 128) for threshold in (0.45, 0.55, 0.65))
-    if not result or len(result) > 9 or any(not isinstance(item, SemanticConfig) for item in result):
+    if not result or len(result) > 9 or any(not isinstance(item, CoherentSemanticConfig) for item in result):
         raise ValueError("invalid_comparison_config_budget")
     ids = []
     for item in result:
@@ -114,13 +113,7 @@ def _select_configs(baseline: SemanticConfig, configs: tuple[SemanticConfig, ...
     return tuple(result)
 
 
-def _boundary_result(case: dict, vectors, config: SemanticConfig, counter) -> tuple[list[dict] | None, dict, float]:
-    """保留旧重放的三项结果接口；新规则使用包含结构证据的完整计算结果。"""
-    segments, decision, elapsed, _ = _boundary_calculation(case, vectors, config, counter)
-    return segments, decision, elapsed
-
-
-def _boundary_calculation(case: dict, vectors, config: SemanticConfig, counter) -> tuple[list[dict] | None, dict, float, dict | None]:
+def _boundary_calculation(case: dict, vectors, config: CoherentSemanticConfig, counter) -> tuple[list[dict] | None, dict, float, dict | None]:
     """执行纯边界规则并保留独立来源证据；系统性embedding错误向上终止。
 
     领域失败无部分片段或结构trace，行为与运行API一致。decision并入冻结
@@ -134,8 +127,6 @@ def _boundary_calculation(case: dict, vectors, config: SemanticConfig, counter) 
         segments, decision = calculated.segments, calculated.decision
         records = [asdict(segment) for segment in segments]
         validate(case["source_text"], records)
-        if calculated.structure_trace is not None:
-            structure = json.loads(canonical_json(asdict(calculated.structure_trace)))
         if calculated.meaning_trace is not None:
             structure = json.loads(canonical_json(asdict(calculated.meaning_trace)))
     except EmbeddingError:
@@ -149,19 +140,10 @@ def _boundary_calculation(case: dict, vectors, config: SemanticConfig, counter) 
     return records, json.loads(canonical_json(asdict(decision))), time.monotonic() - started, structure
 
 
-def _structure_replay(original: object, replayed: dict | None) -> dict:
-    """复验0.2结构证据，不允许重算外层SHA掩盖缺失或伪造的解释。
-
-    只有初始决策中的两种评分适用既有末位容差；结构跨度、原因、策略、
-    超限退让及其token数均要求严格类型和值一致。失败路径两侧都须为None。
-    """
-    return _evidence_replay(original, replayed, kind="structure")
-
-
 def _evidence_replay(original: object, replayed: dict | None, *, kind: str) -> dict:
     """复验独立解释的全部非评分字段，不能用外层SHA替代真实算法重放。
 
-    历史structure和当前meaning分别使用独立键及错误身份；只有初始评分
+    meaning使用独立键及错误身份；只有初始评分
     允许既定末位容差，边界来源、保护块和逐gap理由均要求严格相同。
     """
     if original is None and replayed is None:
@@ -175,15 +157,6 @@ def _evidence_replay(original: object, replayed: dict | None, *, kind: str) -> d
     return {f"{kind}_exact": initial["decision_exact"], "initial_decision_replay": initial}
 
 
-def _evidence_key(config: SemanticConfig) -> str | None:
-    """按显式配置选择独立trace键，不凭缺失字段猜测算法身份。"""
-    if type(config) is CoherentSemanticConfig:
-        return "meaning"
-    if type(config) is StructuredSemanticConfig:
-        return "structure"
-    return None
-
-
 def _case_record(case: dict, segments: list[dict] | None, decision: dict, *, config_id: str,
                  model_hash: str, vector_hash: str | None, cache_hits: int, model_calls: int,
                  elapsed: float | None, counter, targeted: set[int]) -> dict:
@@ -194,8 +167,7 @@ def _case_record(case: dict, segments: list[dict] | None, decision: dict, *, con
             "config_id": config_id, "source_text": case["source_text"], "original_body": case["original_body"],
             "source_text_sha256": hashlib.sha256(case["source_text"].encode()).hexdigest(),
             "units": case["units"], "status": "completed" if segments is not None else "failed",
-            "segments": segments or [], "old_status": case["old_status"], "old_segments": case["old_segments"],
-            "old_boundaries": [segment["end"] for segment in case["old_segments"][:-1]],
+            "segments": segments or [],
             "new_boundaries": [segment["end"] for segment in (segments or [])[:-1]],
             "decision": decision, "unit_count": units,
             "embedded_unit_count": units if units >= 2 else 0, "cache_hit_count": cache_hits,
@@ -215,7 +187,7 @@ def _runtime_resources() -> dict:
 
 
 def compare_semantic_configs(source: ResearchInput, members: Path, run: Path, output: Path, *,
-                             configs: tuple[SemanticConfig, ...] | None = None, cache_dir: Path | None = None,
+                             configs: tuple[CoherentSemanticConfig, ...] | None = None, cache_dir: Path | None = None,
                              counter=None, resource_report: Path | None = None,
                              frozen_input: FrozenDevelopmentInput | None = None) -> dict:
     """从一个已绑定语义运行与有效缓存重放最多九组开发配置。
@@ -256,13 +228,8 @@ def compare_semantic_configs(source: ResearchInput, members: Path, run: Path, ou
         vector_hash = None if vectors is None else hashlib.sha256(vectors.astype("<f4").tobytes(order="C")).hexdigest()
         if vector_hash != trace["summary"].get("vector_content_sha256"):
             raise ValueError("comparison_run_vector_digest_mismatch")
-        structure_evidence = {}
-        evidence_key = _evidence_key(settings.algorithm)
-        if evidence_key is not None:
-            segments, decision, _, structure = _boundary_calculation(case, vectors, settings.algorithm, counter)
-            structure_evidence = _evidence_replay(trace.get(evidence_key), structure, kind=evidence_key)
-        else:
-            segments, decision, _ = _boundary_result(case, vectors, settings.algorithm, counter)
+        segments, decision, _, structure = _boundary_calculation(case, vectors, settings.algorithm, counter)
+        structure_evidence = _evidence_replay(trace.get("meaning"), structure, kind="meaning")
         if not _strict_json_equal(segments, record["text_segments"]):
             raise ValueError("comparison_baseline_reproduction_failed")
         replay_rows.append({"source_post_id": case["source_post_id"],
@@ -282,8 +249,8 @@ def compare_semantic_configs(source: ResearchInput, members: Path, run: Path, ou
             elapsed=record.get("boundary_seconds"), counter=counter, targeted=targeted))
         # trace计时覆盖候选、向量与边界；不能挪作纯边界耗时。
         baseline_rows[-1]["processing_seconds"] = trace.get("processing_seconds")
-        if evidence_key is not None and trace.get(evidence_key) is not None:
-            baseline_rows[-1][evidence_key] = trace[evidence_key]
+        if trace.get("meaning") is not None:
+            baseline_rows[-1]["meaning"] = trace["meaning"]
     if any(sum(row[key] for row in baseline_rows) != manifest["counts"][key]
            for key in ("embedded_unit_count", "cache_hit_count", "model_call_count")):
         raise ValueError("comparison_run_aggregate_counts_mismatch")
@@ -307,18 +274,14 @@ def compare_semantic_configs(source: ResearchInput, members: Path, run: Path, ou
             rows = []
             for case in frozen.cases:
                 vectors = vectors_by_post[case["source_post_id"]]
-                structure = None
-                if _evidence_key(config) is not None:
-                    segments, decision, elapsed, structure = _boundary_calculation(case, vectors, config, counter)
-                else:
-                    segments, decision, elapsed = _boundary_result(case, vectors, config, counter)
+                segments, decision, elapsed, structure = _boundary_calculation(case, vectors, config, counter)
                 vector_hash = None if vectors is None else hashlib.sha256(vectors.astype("<f4").tobytes(order="C")).hexdigest()
                 rows.append(_case_record(case, segments, decision, config_id=spec["config_id"],
                     model_hash=manifest["model_identity_sha256"], vector_hash=vector_hash,
                     cache_hits=len(case["units"]) if vectors is not None else 0, model_calls=0,
                     elapsed=elapsed, counter=counter, targeted=targeted))
                 if structure is not None:
-                    rows[-1][_evidence_key(config)] = structure
+                    rows[-1]["meaning"] = structure
             for row, baseline in zip(rows, baseline_rows, strict=True):
                 row.update({"baseline_config_id": baseline_config_id, "baseline_segments": baseline["segments"],
                             "baseline_boundaries": baseline["new_boundaries"], "baseline_decision": baseline["decision"]})

@@ -9,7 +9,6 @@ import sys
 
 import pytest
 
-from tourism_ugc_study.segmentation.batch import run_research_segmentation
 from tourism_ugc_study.segmentation.config import ResearchInput, load_research_input
 from tourism_ugc_study.segmentation.source import file_sha256, open_research_corpus
 
@@ -57,22 +56,8 @@ def test_selects_only_keep_and_never_writes_sources(tmp_path):
     with open_research_corpus(config) as corpus:
         assert corpus.identity["record_count"] == 4
         assert [p.source_post_id for p in corpus.posts] == [1, 2, 3, 4]
-    output = tmp_path / "run"
-    manifest = run_research_segmentation(config, output, code_version="synthetic")
-    assert manifest["status"] == "completed_with_failures"
-    assert manifest["counts"]["post_count"] == 4
-    assert manifest["counts"]["completed_count"] == 3
-    assert manifest["counts"]["failed_count"] == 1
-    assert manifest["counts"]["empty_count"] == 2
-    assert manifest["counts"]["segment_count"] == 2
-    rows = [json.loads(line) for line in (output / "posts.jsonl").read_text().splitlines()]
-    assert rows[1]["text_segments"] is None and rows[2]["text_segments"] == []
-    assert [r["source_post_id"] for r in rows] == [1, 2, 3, 4]
-    assert file_sha256(output / "posts.jsonl") == manifest["posts_sha256"]
     assert [file_sha256(p) for p in (config.membership_db, config.source_db, config.candidate_manifest)] == before
     assert not list(tmp_path.glob("*.sqlite-*"))
-    with pytest.raises(FileExistsError):
-        run_research_segmentation(config, output, code_version="synthetic")
 
 
 @pytest.mark.parametrize("option", ["mismatch", "missing"])
@@ -81,7 +66,8 @@ def test_bad_pairing_rejects_whole_run(tmp_path, option):
     config = make_input(tmp_path, **{option: True})
     output = tmp_path / "bad-run"
     with pytest.raises(ValueError, match="不一致"):
-        run_research_segmentation(config, output, code_version="synthetic")
+        with open_research_corpus(config) as corpus:
+            list(corpus.posts)
     assert not output.exists() and not list(tmp_path.glob(".bad-run-*"))
 
 
