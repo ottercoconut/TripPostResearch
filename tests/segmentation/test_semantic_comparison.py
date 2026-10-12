@@ -158,3 +158,22 @@ def source_for_fixture(tmp_path):
     from tourism_ugc_study.segmentation.config import ResearchInput
     manifest = tmp_path / 'candidate-manifest.json'
     return ResearchInput(tmp_path / 'members.sqlite', tmp_path / 'source.sqlite', manifest, file_sha256(manifest))
+
+
+@pytest.mark.parametrize('delta, accepted', [(1e-12, True), (1.0001e-12, False)])
+def test_score_replay_absolute_limit_is_inclusive_without_relative_tolerance(delta, accepted):
+    """零分值给出精确绝对界；大评分也不能借相对容差掩盖超限。"""
+    original = {'gaps': [{'index': 0, 'cohesion': 0.0, 'depth': 0.0,
+                         'candidate': False, 'selected': False, 'reason': 'keep'}]}
+    replay = deepcopy(original)
+    replay['gaps'][0]['depth'] = delta
+    if accepted:
+        assert semantic_comparison._baseline_decision_replay(original, replay)['max_absolute_delta'] == delta
+    else:
+        with pytest.raises(ValueError, match='comparison_baseline_reproduction_failed'):
+            semantic_comparison._baseline_decision_replay(original, replay)
+    original['gaps'][0]['cohesion'] = 1e6
+    replay = deepcopy(original)
+    replay['gaps'][0]['cohesion'] += 1e-6
+    with pytest.raises(ValueError, match='comparison_baseline_reproduction_failed'):
+        semantic_comparison._baseline_decision_replay(original, replay)
