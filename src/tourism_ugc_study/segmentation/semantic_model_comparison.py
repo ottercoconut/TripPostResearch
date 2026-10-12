@@ -16,8 +16,8 @@ from pathlib import Path
 from .artifacts import canonical_json, new_run_directory, write_json
 from .embedding import identity_sha256
 from .integrity import WHITE, validate
-from .semantic_config import (RUN_KIND, SemanticConfig, SemanticSettings,
-                              parse_semantic_settings, validate_identity_settings,
+from .semantic_config import (RUN_KIND, SemanticSettings,
+                              parse_algorithm_config, parse_semantic_settings, validate_identity_settings,
                               validate_semantic_rule_identity)
 from .semantic_reporting import summarize_comparison_cases
 from .source import file_sha256
@@ -79,9 +79,9 @@ def _validate_budget(manifest: dict, settings: SemanticSettings) -> dict[str, di
     fixed = asdict(settings.algorithm)
     result = {}
     for spec in specs:
-        algorithm = SemanticConfig(**spec["algorithm"])
+        algorithm = parse_algorithm_config(spec["algorithm"], require_complete=True)
         values = asdict(algorithm)
-        if (values != spec["algorithm"]
+        if (values != spec["algorithm"] or values.keys() != fixed.keys()
                 or algorithm.window_tokens not in {32, 64, 128}
                 or algorithm.absolute_cohesion_threshold not in {0.45, 0.55, 0.65}
                 or any(value != fixed[key] for key, value in values.items()

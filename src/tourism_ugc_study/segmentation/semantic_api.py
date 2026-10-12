@@ -15,8 +15,8 @@ from .embedding import EmbeddingError, EmbeddingProvider, TokenCounter, identity
 from .embedding_cache import EmbeddingCache
 from .integrity import validate
 from .projection import PROJECTION_ID, project_structured_text
-from .semantic_boundaries import choose_boundaries
-from .semantic_config import IMPLEMENTATION_VERSION, RULE_VERSION, SemanticConfig
+from .semantic_config import SemanticConfig, semantic_rule_identity
+from .semantic_dispatch import StructureTrace, choose_semantic_boundaries
 from .semantic_units import build_units
 
 
@@ -26,6 +26,8 @@ class SemanticOutput:
 
     units及decision用于本地检查，不是新增数据库列。实际调用数按模型forward
     计数，embedded_unit_count按参与评分单元计数，缓存命中仍属于语义参与。
+    structure_trace仅0.2成功时提供；调用方写trace时须省略None，保持旧运行
+    字段不变。summary始终只使用最终decision，不混入结构或初始临时决策。
     """
 
     result: SegmentationResult
@@ -36,6 +38,7 @@ class SemanticOutput:
     embedded_unit_count: int
     cache_hit_count: int
     model_call_count: int
+    structure_trace: StructureTrace | None = None
 
     def summary(self) -> dict:
         """不含原文的紧凑诊断；投影reason_code保持原用途。"""
@@ -63,6 +66,7 @@ def segment_body_semantic(
     """
     if body is not None and not isinstance(body, str):
         raise TypeError("body必须是字符串或None")
+    rule_version, implementation_version = semantic_rule_identity(config)
     projection = project_structured_text("" if body is None else body)
     source = projection.text if projection.status == "usable" else None
     reason = "source_body_null" if body is None else projection.reason_code
@@ -72,6 +76,7 @@ def segment_body_semantic(
     issues = ()
     vector_hash = None
     embedded_count = 0
+    structure_trace = None
     decision = SemanticDecision("failed", (reason,), (), (), ())
     hits_before = cache.cache_hit_count if cache else 0
     calls_before = getattr(provider, "model_call_count", 0)
@@ -93,12 +98,15 @@ def segment_body_semantic(
                 vector_hash = hashlib.sha256(vectors.astype("<f4").tobytes(order="C")).hexdigest()
                 embedded_count = len(units)
             try:
-                segments, decision = choose_boundaries(source, units, vectors, config, token_counter)
+                selected = choose_semantic_boundaries(source, units, vectors, config, token_counter)
+                segments, decision = selected.segments, selected.decision
+                structure_trace = selected.structure_trace
                 validate(source, [asdict(s) for s in segments])
             except EmbeddingError:
                 raise
             except ValueError as exc:
                 segments = None
+                structure_trace = None
                 decision = SemanticDecision("failed", (str(exc),), (), (), ())
             else:
                 codes = tuple(dict.fromkeys((*built.diagnostics, *decision.reason_codes)))
@@ -107,7 +115,7 @@ def segment_body_semantic(
                 if not units:
                     issues = (SegmentationIssue("EMPTY_BODY", 0, len(source)),)
     result = SegmentationResult(
-        rule_version=RULE_VERSION, implementation_version=IMPLEMENTATION_VERSION,
+        rule_version=rule_version, implementation_version=implementation_version,
         projection_id=PROJECTION_ID, status="completed" if segments is not None else "failed",
         reason_code=reason, body_was_null=body is None,
         source_body_sha256=None if body is None else hashlib.sha256(body.encode()).hexdigest(),
@@ -117,4 +125,4 @@ def segment_body_semantic(
     )
     return SemanticOutput(result, units, decision, model_hash, vector_hash, embedded_count,
                           (cache.cache_hit_count - hits_before) if cache else 0,
-                          getattr(provider, "model_call_count", 0) - calls_before)
+                          getattr(provider, "model_call_count", 0) - calls_before, structure_trace)

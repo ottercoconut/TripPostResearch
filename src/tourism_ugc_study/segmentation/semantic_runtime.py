@@ -25,7 +25,7 @@ from typing import Callable
 from .artifacts import canonical_json, write_json
 from .config import ResearchInput
 from .embedding_probe import _pressure_level, _swap_bytes
-from .semantic_config import EmbeddingConfig, SemanticConfig, SemanticSettings
+from .semantic_config import SemanticSettings, parse_semantic_settings
 from .semantic_development_input import (
     FrozenDevelopmentInput, frozen_development_parameters, read_frozen_development_input,
 )
@@ -381,7 +381,7 @@ def _worker(request_path: Path) -> int:
     else:
         raise ValueError("invalid_semantic_runtime_input_kind")
     raw_settings = request["settings"]
-    settings = SemanticSettings(SemanticConfig(**raw_settings["algorithm"]), EmbeddingConfig(**raw_settings["embedding"]))
+    settings = parse_semantic_settings(raw_settings)
     policy = LinuxResourcePolicy(**request["resource_policy"]) if "resource_policy" in request else None
 
     def worker_state(state: dict) -> None:

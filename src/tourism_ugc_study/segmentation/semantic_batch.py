@@ -22,7 +22,7 @@ from .embedding import QwenEmbeddingProvider, identity_sha256, validate_vectors
 from .embedding_cache import EmbeddingCache
 from .projection import PROJECTION_ID
 from .semantic_api import segment_body_semantic
-from .semantic_config import (IMPLEMENTATION_VERSION, RULE_VERSION, RUN_KIND, SemanticSettings,
+from .semantic_config import (RUN_KIND, SemanticSettings, semantic_rule_identity,
                               validate_identity_settings)
 from .semantic_development_input import (
     FrozenDevelopmentInput, development_units_sha256, frozen_development_parameters,
@@ -55,6 +55,7 @@ def run_semantic_batch(
     FrozenDevelopmentInput自动固定包内全部成员，始终development；只读取案例，
     不访问源库。其逐帖source_snapshot_sha256明确继承parent来源引用。
     """
+    rule_version, implementation_version = semantic_rule_identity(settings.algorithm)
     offline = isinstance(config, FrozenDevelopmentInput)
     if offline:
         post_ids, seed, members_path = frozen_development_parameters(config, post_ids, seed, members_path)
@@ -148,11 +149,15 @@ def run_semantic_batch(
                         line = canonical_json(row) + "\n"
                         stream.write(line)
                         output_hash.update(line.encode())
-                        traces.write(canonical_json({"source_post_id": post.source_post_id,
+                        trace_row = {"source_post_id": post.source_post_id,
                             "source_text_sha256": result.result.source_text_sha256,
                             "units": [asdict(u) for u in result.units],
                             "decision": asdict(result.decision), "summary": result.summary(),
-                            "processing_seconds": processing_seconds}) + "\n")
+                            "processing_seconds": processing_seconds}
+                        # 旧运行的trace结构保持不变；新规则的结构证据不进入单表摘要。
+                        if result.structure_trace is not None:
+                            trace_row["structure"] = asdict(result.structure_trace)
+                        traces.write(canonical_json(trace_row) + "\n")
                         ordered_input.update((canonical_json([post.source_post_id, post.source_version,
                                                              result.result.source_body_sha256]) + "\n").encode())
                         seen.append(post.source_post_id)
@@ -186,7 +191,7 @@ def run_semantic_batch(
             manifest = {
                 "artifact_kind": RUN_KIND, "scope": "development" if post_ids is not None else "full_corpus",
                 "status": "completed_with_failures" if counts["failed_count"] else "completed",
-                "rule_version": RULE_VERSION, "implementation_version": IMPLEMENTATION_VERSION,
+                "rule_version": rule_version, "implementation_version": implementation_version,
                 "projection_id": PROJECTION_ID, "code_version": code_version, "runtime": runtime,
                 "code_snapshot": snapshot, "resource_supervision": resource_supervision,
                 "input": source_identity, "input_paths": {k: str(v) for k, v in asdict(config).items()},

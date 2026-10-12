@@ -1,0 +1,25 @@
+{
+  "algorithm": {
+    "unit_max_tokens": 64,
+    "window_tokens": 128,
+    "absolute_cohesion_threshold": 0.55,
+    "depth_floor": 0.15,
+    "depth_std_factor": 0.5,
+    "min_segment_nonspace_chars": 32,
+    "max_segment_tokens": 512,
+    "epsilon": 1e-06,
+    "smoothing": 0,
+    "rule_version": "semantic-depth-ugc-0.2",
+    "structure_mode": "context",
+    "length_strategy": "global"
+  },
+  "embedding": {
+    "model_id": "Qwen/Qwen3-Embedding-8B",
+    "revision": "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af",
+    "device": "cuda",
+    "dtype": "bfloat16",
+    "batch_size": 1,
+    "max_input_tokens": 256,
+    "instruction": "Retrieve semantically similar text"
+  }
+}
