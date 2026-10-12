@@ -146,10 +146,18 @@ def test_sharded_index_change_cannot_certify_unbound_loaded_weights(tmp_path, mo
             loaded.append(name)
         return MetadataModel()
 
+    def resolve_asset(model_id, name, **kwargs):
+        """像真实离线HF缓存一样用缺失异常触发单文件到分片的fallback。"""
+        from huggingface_hub.errors import LocalEntryNotFoundError
+
+        path = tmp_path / name
+        if not path.is_file():
+            raise LocalEntryNotFoundError(name)
+        return str(path)
+
     monkeypatch.setattr(QwenTokenCounter, "__init__", synthetic_counter)
     monkeypatch.setattr(QwenTokenCounter, "_bind_assets", bind_then_replace)
-    monkeypatch.setattr(huggingface_hub, "hf_hub_download",
-                        lambda model_id, name, **kwargs: str(tmp_path / name))
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download", resolve_asset)
     monkeypatch.setattr(transformers.AutoModel, "from_pretrained", load_declared_weights)
     monkeypatch.setattr(Path, "read_text", read_index_then_replace)
     try:
@@ -167,6 +175,59 @@ def test_sharded_index_change_cannot_certify_unbound_loaded_weights(tmp_path, mo
     assert set(loaded) <= set(provider.identity["assets_sha256"])
     assert change_phase == "stable"
     assert set(provider.identity["assets_sha256"]) == {index.name, old_shard}
+
+
+def test_bound_checkpoint_matches_real_transformers_single_file_precedence(tmp_path, monkeypatch):
+    """真实离线HF选择器优先单文件，provider不能只绑定旁边的索引和分片。
+
+    同一固定revision缓存内放置两种合成checkpoint；只替换tokenizer初始化
+    和权重加载，不mock HF路径查找或Transformers选择器，也不加载权重。
+    """
+    import torch
+    import transformers
+    from pathlib import Path
+    from transformers import modeling_utils
+
+    model_id = "Qwen/Qwen3-Embedding-8B"
+    revision = "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af"
+    cache = tmp_path / "hf-cache"
+    snapshot = cache / "models--Qwen--Qwen3-Embedding-8B" / "snapshots" / revision
+    snapshot.mkdir(parents=True)
+    (snapshot / "model.safetensors.index.json").write_text(
+        json.dumps({"weight_map": {"weight": "old-part.safetensors"}}))
+    for name in ("model.safetensors", "old-part.safetensors"):
+        (snapshot / name).write_bytes(name.encode())
+    loaded = []
+
+    def synthetic_counter(self, **kwargs):
+        """保留真实HF资产绑定；只省去与checkpoint选择无关的tokenizer加载。"""
+        self._asset_paths, self._asset_stats = {}, {}
+        self._asset_kwargs = {name: kwargs[name] for name in
+                              ("model_id", "revision", "local_files_only", "cache_dir")}
+        self.identity = {"dimension": 4096, "assets_sha256": {}, "dependencies": {}}
+
+    def resolve_without_loading(name, **kwargs):
+        """调用实际loader的checkpoint选择器，仅返回参数元数据，不做forward。"""
+        files, _ = modeling_utils._get_resolved_checkpoint_files(
+            pretrained_model_name_or_path=name, variant=None, gguf_file=None,
+            use_safetensors=None, user_agent=None, is_remote_code=False,
+            download_kwargs={"revision": kwargs["revision"], "local_files_only": True,
+                             "cache_dir": kwargs["cache_dir"]})
+        loaded.extend(Path(path).name for path in files)
+        metadata = SimpleNamespace(config=SimpleNamespace(_commit_hash=revision, use_cache=False),
+            parameters=lambda: [SimpleNamespace(dtype=torch.float32, device=torch.device("cpu"))])
+        metadata.to = lambda device: metadata
+        metadata.eval = lambda: metadata
+        return metadata
+
+    monkeypatch.setattr(QwenTokenCounter, "__init__", synthetic_counter)
+    monkeypatch.setattr(transformers.AutoModel, "from_pretrained", resolve_without_loading)
+    provider = QwenEmbeddingProvider(model_id=model_id, revision=revision,
+        device="cpu", dtype="float32", batch_size=1, cache_dir=str(cache), local_files_only=True)
+    provider.verify_assets()
+    assert loaded == ["model.safetensors"]
+    assert set(loaded) <= set(provider.identity["assets_sha256"])
+    assert set(provider.identity["assets_sha256"]) == set(loaded)
 
 
 def _fake_provider():

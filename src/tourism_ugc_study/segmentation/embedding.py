@@ -281,11 +281,12 @@ class QwenEmbeddingProvider(QwenTokenCounter):
             torch.mps.set_per_process_memory_fraction(0.5)
         from huggingface_hub.errors import EntryNotFoundError, LocalEntryNotFoundError
 
+        # 与Transformers默认checkpoint选择一致：单文件存在时优先使用它，
+        # 只有单文件缺失才选择索引及分片，否则身份会遗漏实际加载的权重。
         try:
-            self._bind_assets(("model.safetensors.index.json",))
-        except (EntryNotFoundError, LocalEntryNotFoundError):
             self._bind_assets(("model.safetensors",))
-        else:
+        except (EntryNotFoundError, LocalEntryNotFoundError):
+            self._bind_assets(("model.safetensors.index.json",))
             # 先绑定索引，再从同一已绑定路径列出分片；否则索引读取后换文件
             # 会留下“新索引摘要＋旧分片摘要”，无法证明实际加载的新权重。
             # 绑定之后的变化仍由既有加载后资产复验拒绝，不重新接受新身份。
