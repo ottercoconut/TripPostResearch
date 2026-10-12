@@ -130,6 +130,8 @@ def validate_identity_settings(identity: dict, settings: EmbeddingConfig) -> Non
 
     完整资产摘要另由provider复验；这里不打开模型文件，可用于运行及发布包
     的独立验收。测试provider也必须提供同一显式身份，不能例外发布。
+    CUDA必须显式证明固定padding宽度与声明预算一致；旧CUDA身份不静默升级，
+    CPU/MPS仍接受既有不含这两个字段的身份。
     """
     expected = {
         "provider": "qwen-transformers-local-v1",
@@ -143,6 +145,8 @@ def validate_identity_settings(identity: dict, settings: EmbeddingConfig) -> Non
         "truncation": False, "pooling": "last_valid_token", "normalization": "l2_float32",
         "quantization": None, "attention_backend": "eager", "use_cache": False,
     }
+    if settings.device == "cuda":
+        expected.update(padding_strategy="max_length", padding_max_length=settings.max_input_tokens)
     if not isinstance(identity, dict) or any(
         key not in identity or type(identity[key]) is not type(value) or identity[key] != value
         for key, value in expected.items()

@@ -1,7 +1,8 @@
 """冻结开发单元的缓存重放比较，不加载模型或改写来源。
 
-入口先验证真实运行与冻结来源，再要求初始配置逐字段复现结果。最多九组
-仅改变窗口和绝对阈值，缓存缺失／损坏或原始结果不一致直接拒绝发布半包。
+入口先验证真实运行与冻结来源，再要求初始配置复现决策、跨度与向量字节。
+仅gap的两个float评分允许已声明的绝对末位差并记录实际漂移；其余字段严格
+核对类型与值。最多九组仅改变窗口和绝对阈值，不一致直接拒绝发布半包。
 私有对照包含全文；四层统计和待审模板不宣称语义质量已经通过。
 """
 
@@ -11,6 +12,7 @@ from dataclasses import asdict, replace
 from datetime import datetime
 import hashlib
 import json
+import math
 from pathlib import Path
 import resource
 import sys
@@ -33,11 +35,63 @@ from .source import file_sha256
 
 COMPARISON_KIND = "semantic-development-comparison"
 _TUNABLE = {"window_tokens", "absolute_cohesion_threshold"}
+_REPLAY_ABSOLUTE_TOLERANCE = 1e-12
 
 
 def _read_jsonl(path: Path) -> list[dict]:
     """读取已校验摘要的私有逐帖文件，保留原顺序。"""
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def _strict_json_equal(left, right) -> bool:
+    """递归核对JSON的类型和值；拒绝Python默认把bool/int或int/float视为相等。
+
+    dict键集合及list顺序须完全相同；本函数不提供任何数值容差，用于正文
+    跨度和决策中不允许漂移的字段。非有限float也不能作为精确复现证据。
+    """
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(_strict_json_equal(left[key], right[key]) for key in left)
+    if isinstance(left, list):
+        return len(left) == len(right) and all(_strict_json_equal(a, b) for a, b in zip(left, right, strict=True))
+    if isinstance(left, float) and not (math.isfinite(left) and math.isfinite(right)):
+        return False
+    return left == right
+
+
+def _baseline_decision_replay(original: dict, replayed: dict) -> dict:
+    """核对原trace决策并返回末位差证据；失败统一拒绝基线发布。
+
+    只有gaps中cohesion/depth的有限float允许绝对差不超过1e-12，不用相对
+    容差。键、类型、候选、选点、原因、边界及顺序仍须严格相同。本函数
+    不改输入；通过后基线继续使用原trace，候选保留本机真实计算值。
+    """
+    failure = "comparison_baseline_reproduction_failed"
+    if (type(original) is not dict or type(replayed) is not dict or original.keys() != replayed.keys()
+            or "gaps" not in original or type(original["gaps"]) is not list
+            or type(replayed["gaps"]) is not list or len(original["gaps"]) != len(replayed["gaps"])
+            or not all(_strict_json_equal(original[key], replayed[key]) for key in original if key != "gaps")):
+        raise ValueError(failure)
+    maxima = {"cohesion": 0.0, "depth": 0.0}
+    changed = 0
+    for before, after in zip(original["gaps"], replayed["gaps"], strict=True):
+        if (type(before) is not dict or type(after) is not dict or before.keys() != after.keys()
+                or not maxima.keys() <= before.keys()
+                or not all(_strict_json_equal(before[key], after[key]) for key in before if key not in maxima)):
+            raise ValueError(failure)
+        for field in maxima:
+            left, right = before[field], after[field]
+            if type(left) is not float or type(right) is not float or not (math.isfinite(left) and math.isfinite(right)):
+                raise ValueError(failure)
+            delta = abs(left - right)
+            if delta > _REPLAY_ABSOLUTE_TOLERANCE:
+                raise ValueError(failure)
+            maxima[field] = max(maxima[field], delta)
+            changed += left != right
+    return {"decision_exact": changed == 0, "changed_score_count": changed,
+            "cohesion_max_absolute_delta": maxima["cohesion"], "depth_max_absolute_delta": maxima["depth"],
+            "max_absolute_delta": max(maxima.values())}
 
 
 def _select_configs(baseline: SemanticConfig, configs: tuple[SemanticConfig, ...] | None) -> tuple[SemanticConfig, ...]:
@@ -113,8 +167,9 @@ def compare_semantic_configs(source: ResearchInput, members: Path, run: Path, ou
     """从一个已绑定语义运行与有效缓存重放最多九组开发配置。
 
     counter 默认只加载本地 tokenizer；测试注入仍核对其模型声明。窗口和阈值
-    不影响缓存身份，其余算法参数固定。原配置先重放并逐字段比较 trace /
-    segments / 向量摘要；缺缓存或不一致绝不 forward、补算或重抽成员。
+    不影响缓存身份，其余算法参数固定。原配置先重放：向量摘要、片段和决策
+    非评分字段严格相同，仅cohesion/depth允许有限float绝对末位差并记录。
+    基线保留原trace决策；缺缓存或不一致绝不forward、补算或重抽成员。
     resource_report 可补真实运行的资源观察，必须绑定 run manifest SHA。
     离线run必须显式提供frozen_input，并在本机重新核对完整来源；输出input
     仍是原run实际包身份，候选摘要用此身份重绑，不借用旧全库摘要。
@@ -139,7 +194,7 @@ def compare_semantic_configs(source: ResearchInput, members: Path, run: Path, ou
     actual_cache = cache_dir if cache_dir is not None else Path(manifest["cache_directory"])
     needs_vectors = any(len(case["units"]) >= 2 for case in frozen.cases)
     cache = EmbeddingCache(actual_cache, manifest["model_identity"], readonly=True) if needs_vectors else None
-    vectors_by_post, baseline_rows = {}, []
+    vectors_by_post, baseline_rows, replay_rows = {}, [], []
     baseline_config_id = settings.fingerprint
     for case, record, trace in zip(frozen.cases, records, traces, strict=True):
         units = case["units"]
@@ -148,8 +203,10 @@ def compare_semantic_configs(source: ResearchInput, members: Path, run: Path, ou
         if vector_hash != trace["summary"].get("vector_content_sha256"):
             raise ValueError("comparison_run_vector_digest_mismatch")
         segments, decision, _ = _boundary_result(case, vectors, settings.algorithm, counter)
-        if segments != record["text_segments"] or decision != trace["decision"]:
+        if not _strict_json_equal(segments, record["text_segments"]):
             raise ValueError("comparison_baseline_reproduction_failed")
+        replay_rows.append({"source_post_id": case["source_post_id"],
+                            **_baseline_decision_replay(trace["decision"], decision)})
         original = record["semantic_diagnostics"]
         counts = {"unit_count": len(units), "candidate_gap_count": max(0, len(units) - 1),
                   "embedded_unit_count": len(units) if len(units) >= 2 else 0,
@@ -159,7 +216,7 @@ def compare_semantic_configs(source: ResearchInput, members: Path, run: Path, ou
         if any(original.get(key) != value for key, value in counts.items()):
             raise ValueError("comparison_run_summary_counts_mismatch")
         vectors_by_post[case["source_post_id"]] = vectors
-        baseline_rows.append(_case_record(case, segments, decision, config_id=baseline_config_id,
+        baseline_rows.append(_case_record(case, segments, trace["decision"], config_id=baseline_config_id,
             model_hash=manifest["model_identity_sha256"], vector_hash=vector_hash,
             cache_hits=original["cache_hit_count"], model_calls=original["model_call_count"],
             elapsed=record.get("boundary_seconds"), counter=counter, targeted=targeted))
@@ -213,7 +270,17 @@ def compare_semantic_configs(source: ResearchInput, members: Path, run: Path, ou
         completed_at = manifest.get("completed_at_utc")
         run_seconds = ((datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds()
                        if started_at and completed_at else None)
-        report = {"baseline": {"config_id": baseline_config_id, "statistics": summarize_comparison_cases(baseline_rows),
+        baseline_replay = {"status": "passed", "absolute_tolerance": _REPLAY_ABSOLUTE_TOLERANCE,
+                          "relative_tolerance": 0, "float_fields": ["gaps[].cohesion", "gaps[].depth"],
+                          "post_count": len(replay_rows),
+                          "exact_decision_post_count": sum(row["decision_exact"] for row in replay_rows),
+                          "all_decisions_exact": all(row["decision_exact"] for row in replay_rows),
+                          "max_absolute_delta": max((row["max_absolute_delta"] for row in replay_rows), default=0.0),
+                          "vector_content_sha256_exact": True, "non_score_decision_fields_exact": True,
+                          "segments_exact": True, "baseline_decision_source": "original_run_trace",
+                          "posts": replay_rows}
+        report = {"baseline_replay": baseline_replay,
+                  "baseline": {"config_id": baseline_config_id, "statistics": summarize_comparison_cases(baseline_rows),
                                "run_elapsed_seconds": run_seconds, "resources": resources,
                                "resource_scope": "whole_original_run",
                                "actual_embedding_model_calls": manifest["counts"]["model_call_count"],
