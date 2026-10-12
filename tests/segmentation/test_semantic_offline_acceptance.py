@@ -87,13 +87,13 @@ def test_offline_execution_survives_absent_databases_but_never_becomes_full_corp
         import_segmentation_run(output, bundle, source, code_version="offline-acceptance")
     assert not bundle.exists()
 
-    # 该合成样本恰好覆盖全部keep，仍不能仅改scope和成员标记冒充全库运行。
+    # 该合成样本恰好覆盖全部keep，改scope也无法绕过正式冻结模型配置检查。
     forged = tmp_path / "renamed-as-full-run"
     shutil.copytree(output, forged)
     changed = dict(manifest, scope="full_corpus", selected_post_ids=None,
                    sampling="all_keep_ordered_by_source_post_id")
     (forged / "manifest.json").write_text(json.dumps(changed, ensure_ascii=False))
-    with pytest.raises(ValueError, match="导入目标来源与切分运行来源不一致"):
+    with pytest.raises(ValueError, match="语义运行配置值非法"):
         import_segmentation_run(forged, bundle, source, code_version="offline-acceptance")
     assert not bundle.exists()
 

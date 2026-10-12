@@ -108,9 +108,9 @@ def _validate_members(manifest: dict) -> None:
 
 
 def _case_basis(rows: list[dict]) -> list[dict]:
-    """保留跨配置／模型必须完全相同的正文、来源、候选及旧切分证据。"""
+    """保留跨配置／模型必须完全相同的正文、来源及候选证据。"""
     keys = ("source_post_id", "source_version", "source_text", "source_text_sha256",
-            "original_body", "units", "sample_role", "old_status", "old_segments", "old_boundaries")
+            "original_body", "units", "sample_role")
     return [{key: row[key] for key in keys} for row in rows]
 
 

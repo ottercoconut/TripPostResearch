@@ -16,7 +16,7 @@ import time
 from typing import Callable
 
 from .artifacts import canonical_json, new_run_directory, write_json
-from .batch import runtime_identity
+from .artifacts import runtime_identity
 from .config import ResearchInput
 from .embedding import QwenEmbeddingProvider, identity_sha256, validate_vectors
 from .embedding_cache import EmbeddingCache
@@ -154,9 +154,7 @@ def run_semantic_batch(
                             "units": [asdict(u) for u in result.units],
                             "decision": asdict(result.decision), "summary": result.summary(),
                             "processing_seconds": processing_seconds}
-                        # 旧运行的trace结构保持不变；新规则的结构证据不进入单表摘要。
-                        if result.structure_trace is not None:
-                            trace_row["structure"] = asdict(result.structure_trace)
+                        # 完整解释保存在trace中，不新增数据库列。
                         if result.meaning_trace is not None:
                             trace_row["meaning"] = asdict(result.meaning_trace)
                         traces.write(canonical_json(trace_row) + "\n")

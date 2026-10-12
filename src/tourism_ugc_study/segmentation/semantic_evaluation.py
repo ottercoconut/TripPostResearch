@@ -1,7 +1,7 @@
 """固定开发成员并核查真实tokenizer单元，不加载embedding权重或评价语义效果。
 
 四个可读正文码点长度层各20篇，用单一随机流和固定成员顺序抽取；另保留
-最长帖作为压力样本。原文、旧切分和候选单元只写私有运行目录，公开摘要无原文。
+最长帖作为压力样本。原文和候选单元只写私有运行目录，公开摘要无原文。
 这批材料用于调参，后续独立验收必须排除全部开发及压力成员。
 """
 
@@ -17,9 +17,8 @@ import random
 import time
 from typing import Callable
 
-from .api import segment_body
 from .artifacts import canonical_json, new_run_directory, write_json
-from .batch import runtime_identity
+from .artifacts import runtime_identity
 from .config import ResearchInput
 from .embedding import EmbeddingError, QwenTokenCounter, identity_sha256
 from .integrity import validate
@@ -99,12 +98,9 @@ def prepare_development_sample(
                     row = {"source_post_id": pid, "status": "failed", "reason": str(exc)}
                 else:
                     unit_elapsed = time.monotonic() - started
-                    old = segment_body(posts[pid].body)
                     row = {"source_post_id": pid, "status": "completed", "source_text": text,
                            "original_body": posts[pid].body, "source_version": posts[pid].source_version,
-                           "units": [asdict(u) for u in built.units], "diagnostics": list(built.diagnostics),
-                           "old_status": old.status, "old_reason_code": old.reason_code,
-                           "old_segments": [asdict(s) for s in old.text_segments or ()]}
+                           "units": [asdict(u) for u in built.units], "diagnostics": list(built.diagnostics)}
                     counts["completed"] += 1
                     counts["units"] += len(built.units)
                     key = f"posts_with_{len(built.units)}_units" if len(built.units) < 4 else "posts_with_4plus_units"

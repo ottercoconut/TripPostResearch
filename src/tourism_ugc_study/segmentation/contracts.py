@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal, Protocol
 
 
 class EmbeddingError(ValueError):
@@ -14,7 +15,14 @@ class EmbeddingError(ValueError):
 
     放在轻量契约层，单元构造可以识别系统故障而无需导入numpy或模型依赖。
     """
-from typing import Literal
+
+
+class TokenCounter(Protocol):
+    """纯边界计算使用的精确计数接口，不加载权重或截断原文。"""
+
+    def count(self, text: str) -> int:
+        """返回完整子串的非负token数；非空正文至少含一个token。"""
+        ...
 
 
 @dataclass(frozen=True)
@@ -110,7 +118,7 @@ class SemanticDecision:
     本结构不改变SegmentationResult.reason_code的正文投影含义。
     当前semantic-coherent规则的semantic_boundaries沿用发布字段名，表示
     全部非长度切点（语义与结构来源的并集）；具体来源在MeaningTrace中
-    分别保存。两类最终边界互斥，历史规则的字段和值不作追溯改写。
+    分别保存。两类最终边界互斥，不重叠计数。
     """
 
     status: str

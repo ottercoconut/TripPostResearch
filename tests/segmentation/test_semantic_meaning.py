@@ -7,9 +7,8 @@ import pytest
 from tourism_ugc_study.segmentation.contracts import GapScore, SemanticDecision, TextUnit
 from tourism_ugc_study.segmentation.integrity import WHITE, validate
 from tourism_ugc_study.segmentation.semantic_boundaries import choose_boundaries
-from tourism_ugc_study.segmentation.semantic_config import SemanticConfig
+from tourism_ugc_study.segmentation.semantic_config import CoherentSemanticConfig
 from tourism_ugc_study.segmentation.semantic_meaning import EXPERIMENT_ID, partition_by_meaning
-from tourism_ugc_study.segmentation.semantic_partition import partition_with_structure
 
 
 class CharacterCounter:
@@ -36,7 +35,7 @@ def fixture(parts, *, selected=(), separator="\n", cohesion=0.95):
 def run(parts, *, selected=(), separator="\n", cohesion=0.95, **config):
     """默认保留c32软门槛，明确短条目仍须靠结构自足性得到边界。"""
     text, units, decision = fixture(parts, selected=selected, separator=separator, cohesion=cohesion)
-    settings = SemanticConfig(unit_max_tokens=32, max_segment_tokens=512,
+    settings = CoherentSemanticConfig(unit_max_tokens=32, max_segment_tokens=512,
                               min_segment_nonspace_chars=32, **config)
     return text, partition_by_meaning(text, units, decision, settings, CharacterCounter())
 
@@ -122,7 +121,7 @@ def test_sentence_final_day_title_binds_following_route_without_new_gap():
     parts = ["山河三天慢游笔记。📍Day1", "【车站→河岸→旧城→山顶步道→林间书屋→河畔展馆→住宿】",
              "这一天走过很多地方，最后沿着河岸返回，在入口附近休息了一会才回住处。"]
     text, units, decision = fixture(parts, selected=(0,), cohesion=0.80)
-    config = SemanticConfig(min_segment_nonspace_chars=1, max_segment_tokens=512, absolute_cohesion_threshold=0.85)
+    config = CoherentSemanticConfig(min_segment_nonspace_chars=1, max_segment_tokens=512, absolute_cohesion_threshold=0.85)
     result = partition_by_meaning(text, units, decision, config, CharacterCounter())
     assert result.segments[0].raw_text.startswith("\n".join(parts[:2]))
     assert "rejected_semantic_dependency" in result.gap_decisions[0].reason_codes
@@ -210,7 +209,7 @@ def test_nonmonotonic_exact_tokens_and_forced_internal_split_remain_visible():
         """合成非单调分词器，长前缀反而能落入硬长度预算。"""
         def count(self, value):
             return 3 if value == "甲乙丙丁戊己" else len(value)
-    config = SemanticConfig(unit_max_tokens=2, max_segment_tokens=3, min_segment_nonspace_chars=1)
+    config = CoherentSemanticConfig(unit_max_tokens=2, max_segment_tokens=3, min_segment_nonspace_chars=1)
     result = partition_by_meaning(text, units, decision, config, Counter())
     assert [s.raw_text for s in result.segments] == ["甲乙丙丁戊己", "庚辛"]
     assert result.forced_structure_boundaries == (2,)
@@ -221,7 +220,7 @@ def test_nonmonotonic_exact_tokens_and_forced_internal_split_remain_visible():
 def test_metadata_only_length_tail_is_rejected_if_no_feasible_attachment_exists():
     """硬上限与尾标签绑定真的无解时失败，不返回看似成功的标签孤段。"""
     text, units, decision = fixture(["正文。", "#标签#"])
-    config = SemanticConfig(unit_max_tokens=4, max_segment_tokens=4, min_segment_nonspace_chars=1)
+    config = CoherentSemanticConfig(unit_max_tokens=4, max_segment_tokens=4, min_segment_nonspace_chars=1)
     with pytest.raises(ValueError, match="unsplittable_meaning_segment_limit"):
         partition_by_meaning(text, units, decision, config, CharacterCounter())
 
@@ -229,7 +228,7 @@ def test_metadata_only_length_tail_is_rejected_if_no_feasible_attachment_exists(
 def test_unicode_exact_span_empty_single_and_invalid_inputs():
     """组合字素不被切开；空/单单元也验证输入，坏计数和缺字不能侥幸过关。"""
     text, units, decision = fixture(["✅林间书屋", "e\u0301与家人👨‍👩‍👧‍👦一起休息。", "✅河畔展馆", "沿河慢慢走到入口。"], separator="\r\n  ")
-    config = SemanticConfig(min_segment_nonspace_chars=1)
+    config = CoherentSemanticConfig(min_segment_nonspace_chars=1)
     result = partition_by_meaning(text, units, decision, config, CharacterCounter())
     assert_integrity(text, result, 384)
     blank = SemanticDecision("empty", (), (), (), ())
@@ -242,20 +241,6 @@ def test_unicode_exact_span_empty_single_and_invalid_inputs():
         partition_by_meaning("甲", (TextUnit(0, 1, 2),), blank, config, CharacterCounter())
     with pytest.raises(ValueError, match="字素"):
         partition_by_meaning("e\u0301", (TextUnit(0, 1, 1), TextUnit(1, 2, 1)), replace(blank, gaps=(GapScore(0, 1.0, 0.0, False, False, "synthetic"),)), config, CharacterCounter())
-
-
-def test_new_experimental_path_does_not_mutate_old_rules_or_inputs():
-    """同一输入先后调用旧0.1/0.2结果一致，新规则也不借用正式身份。"""
-    text, units, _ = fixture(["✅河畔展台", "栏杆外可以看到河水和小船。", "✅林间书屋", "屋内的窗边有安静的座椅。"])
-    config, counter = SemanticConfig(min_segment_nonspace_chars=1), CharacterCounter()
-    vectors = [[1.0, 0.0]] * len(units)
-    old_segments, decision = choose_boundaries(text, units, vectors, config, counter)
-    before = partition_with_structure(text, units, decision, config, counter, mode="context")
-    experimental = partition_by_meaning(text, units, decision, config, counter)
-    assert choose_boundaries(text, units, vectors, config, counter) == (old_segments, decision)
-    assert partition_with_structure(text, units, decision, config, counter, mode="context") == before
-    assert len(experimental.segments) == 2
-    assert experimental.experiment_id.startswith("experimental-")
 
 
 @pytest.mark.parametrize("title_has_gap", [True, False])
@@ -272,7 +257,7 @@ def test_sentence_final_schedule_uses_its_own_start_not_the_prior_narration(titl
     units = tuple(TextUnit(a, b, b - a) for a, b in spans)
     decision = SemanticDecision("scored_keep", (), tuple(
         GapScore(i, 0.95, 0.0, False, False, "synthetic") for i in range(len(units) - 1)), (), ())
-    config = SemanticConfig(min_segment_nonspace_chars=1, max_segment_tokens=512)
+    config = CoherentSemanticConfig(min_segment_nonspace_chars=1, max_segment_tokens=512)
     result = partition_by_meaning(text, units, decision, config, CharacterCounter())
     block = next(b for b in result.protected_blocks if b.kind == "trailing_schedule_heading")
     assert block.start == title_start
@@ -294,7 +279,7 @@ def test_pure_metadata_forms_share_the_same_tail_attachment(tail):
     """纯链接、标签账号混排及纯装饰尾行都依赖正文，不单独输出。"""
     parts = ["我们沿着山路慢慢走到展台。", tail]
     text, units, decision = fixture(parts, selected=(0,))
-    config = SemanticConfig(min_segment_nonspace_chars=1, max_segment_tokens=512)
+    config = CoherentSemanticConfig(min_segment_nonspace_chars=1, max_segment_tokens=512)
     result = partition_by_meaning(text, units, decision, config, CharacterCounter())
     assert [s.raw_text for s in result.segments] == [text]
     assert "inside_trailing_metadata_context" in result.gap_decisions[0].reason_codes
@@ -306,7 +291,7 @@ def test_pure_metadata_tail_fails_when_hard_limit_prevents_attachment(tail):
     """每个单元可装下但正文与纯尾行合并无解时，不用元数据孤段回避上限。"""
     text, units, decision = fixture(["正文。", tail])
     maximum = len(tail)
-    config = SemanticConfig(unit_max_tokens=maximum, max_segment_tokens=maximum,
+    config = CoherentSemanticConfig(unit_max_tokens=maximum, max_segment_tokens=maximum,
                             min_segment_nonspace_chars=1)
     with pytest.raises(ValueError, match="unsplittable_meaning_segment_limit"):
         partition_by_meaning(text, units, decision, config, CharacterCounter())
@@ -318,7 +303,7 @@ def test_substantive_tail_mentioning_metadata_remains_independent(body):
     """含标签或链接的普通陈述仍是正文，不能被纯尾部规则强制合并。"""
     parts = ["我们沿着山路慢慢走到展台。", body]
     text, units, decision = fixture(parts, selected=(0,))
-    config = SemanticConfig(min_segment_nonspace_chars=1, max_segment_tokens=512)
+    config = CoherentSemanticConfig(min_segment_nonspace_chars=1, max_segment_tokens=512)
     result = partition_by_meaning(text, units, decision, config, CharacterCounter())
     assert [s.raw_text for s in result.segments] == parts
     assert not any(block.kind == "trailing_metadata_context" for block in result.protected_blocks)
@@ -334,7 +319,7 @@ def test_component_introduction_keeps_its_numbered_parts_before_experience_secti
              "【实际游览体验】：", "我们中午来到展馆，发现入口广场没有遮阴，排队时十分闷热。"]
     text, units, decision = fixture(parts, selected=tuple(range(len(parts) - 1)), cohesion=0.2)
     result = partition_by_meaning(text, units, decision,
-                                 SemanticConfig(min_segment_nonspace_chars=1, max_segment_tokens=512),
+                                 CoherentSemanticConfig(min_segment_nonspace_chars=1, max_segment_tokens=512),
                                  CharacterCounter())
     assert [s.raw_text for s in result.segments] == ["\n".join(parts[:5]), "\n".join(parts[5:])]
     assert any("inside_coherent_enumeration" in trace.reason_codes for trace in result.gap_decisions)
@@ -348,7 +333,7 @@ def test_same_day_recommendations_stay_together_but_next_day_can_start_a_segment
              "📅Day2 山间步道", "我们坐车来到山脚，沿着步道前行，在平台停留之后原路返回。"]
     text, units, decision = fixture(parts, selected=tuple(range(len(parts) - 1)), cohesion=0.2)
     result = partition_by_meaning(text, units, decision,
-                                 SemanticConfig(min_segment_nonspace_chars=1, max_segment_tokens=512),
+                                 CoherentSemanticConfig(min_segment_nonspace_chars=1, max_segment_tokens=512),
                                  CharacterCounter())
     assert [s.raw_text for s in result.segments] == ["\n".join(parts[:6]), "\n".join(parts[6:])]
     assert any("inside_coherent_schedule" in trace.reason_codes for trace in result.gap_decisions)
@@ -362,7 +347,7 @@ def test_oversized_coherent_group_uses_whole_items_when_they_fit_the_hard_limit(
              "2、山间平台：沿着石阶可以来到平台，在这里能够观察河流和周围的树林。",
              "3、镇中书屋：屋里有供游客阅读和休息的座位，窗外是一条安静的街道。"]
     text, units, decision = fixture(parts, selected=(0, 1, 2), cohesion=0.2)
-    config = SemanticConfig(unit_max_tokens=64, max_segment_tokens=75, min_segment_nonspace_chars=1)
+    config = CoherentSemanticConfig(unit_max_tokens=64, max_segment_tokens=75, min_segment_nonspace_chars=1)
     result = partition_by_meaning(text, units, decision, config, CharacterCounter())
     assert len(result.segments) > 1
     items = [block for block in result.protected_blocks if block.kind == "coherent_item"]
@@ -387,7 +372,7 @@ def test_hard_limit_prefers_two_between_item_cuts_to_one_inside_item_cut():
         cursor += len(line) + 1
     decision = SemanticDecision("scored_keep", (), tuple(
         GapScore(i, .95, 0.0, False, False, "synthetic") for i in range(len(units) - 1)), (), ())
-    config = SemanticConfig(unit_max_tokens=64, max_segment_tokens=105,
+    config = CoherentSemanticConfig(unit_max_tokens=64, max_segment_tokens=105,
                             min_segment_nonspace_chars=1)
     result = partition_by_meaning(text, units, decision, config, CharacterCounter())
     assert [s.raw_text for s in result.segments] == ["\n".join(lines[:2]), *lines[2:]]

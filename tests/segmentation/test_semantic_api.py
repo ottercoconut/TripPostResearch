@@ -11,7 +11,7 @@ from tourism_ugc_study.segmentation.embedding import EmbeddingError
 from tourism_ugc_study.segmentation.embedding_cache import EmbeddingCache
 from tourism_ugc_study.segmentation.integrity import validate
 from tourism_ugc_study.segmentation.semantic_api import segment_body_semantic
-from tourism_ugc_study.segmentation.semantic_config import EmbeddingConfig, SemanticConfig
+from tourism_ugc_study.segmentation.semantic_config import EmbeddingConfig, CoherentSemanticConfig
 
 
 class SyntheticProvider:
@@ -39,6 +39,8 @@ class SyntheticProvider:
             "use_cache": False, "assets_sha256": {"synthetic-fixture": "a" * 64},
             "dependencies": {"synthetic-only": "1"},
         }
+        if settings.device == "cuda":
+            self.identity.update(padding_strategy="max_length", padding_max_length=settings.max_input_tokens)
         self.calls = []
         self.model_call_count = 0
         self.asset_checks = 0
@@ -76,7 +78,7 @@ def semantic(body, provider=None, **kwargs):
     """给接口提供一致的合成provider及计数器，避免误用真实加载默认值。"""
     provider = provider or SyntheticProvider()
     return segment_body_semantic(body, provider=provider, token_counter=provider,
-                                 config=SemanticConfig(), **kwargs)
+                                 config=CoherentSemanticConfig(), **kwargs)
 
 
 @pytest.mark.parametrize("body,decision", [(None, "empty"), ("", "empty"), (" \r\n\t", "empty"), ("海边真好看。", "single_unit")])
@@ -115,7 +117,7 @@ def test_three_units_match_endpoint_valley_and_short_posts_can_stay_whole():
     assert len(output.result.text_segments) == 2
     short = semantic("甲。乙。")
     assert short.decision.status == "scored_keep" and short.embedded_unit_count == 2
-    assert "min_segment_nonspace_chars" in short.decision.reason_codes
+    assert "meaning_semantic_boundary_suppressed" in short.decision.reason_codes
     assert [segment.raw_text for segment in short.result.text_segments] == ["甲。乙。"]
 
 
@@ -203,7 +205,7 @@ def test_long_unpunctuated_body_is_covered_without_provider_truncation():
     output = semantic(body, provider)
     assert output.result.status == "completed" and output.decision.status == "length_split"
     assert len(output.units) > 1 and all(len(text) <= 64 for text in provider.calls[0])
-    assert all(len(segment.raw_text) <= 384 for segment in output.result.text_segments)
+    assert all(len(segment.raw_text) <= 512 for segment in output.result.text_segments)
     assert "".join(segment.raw_text for segment in output.result.text_segments) == body
     validate(body, [asdict(segment) for segment in output.result.text_segments])
 

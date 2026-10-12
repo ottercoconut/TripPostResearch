@@ -6,7 +6,7 @@ import json
 import pytest
 
 from tourism_ugc_study.segmentation.semantic_config import (
-    EmbeddingConfig, SemanticConfig, SemanticSettings, load_semantic_settings,
+    EmbeddingConfig, CoherentSemanticConfig, SemanticSettings, load_semantic_settings,
 )
 
 
@@ -20,7 +20,7 @@ from tourism_ugc_study.segmentation.semantic_config import (
 def test_algorithm_rejects_parameters_that_break_boundary_contracts(field, value):
     """长度关系、有限数、正预算与禁用平滑均在任何模型工作前拒绝。"""
     with pytest.raises(ValueError):
-        SemanticConfig(**{field: value})
+        CoherentSemanticConfig(**{field: value})
 
 
 @pytest.mark.parametrize("field,value", [
@@ -37,7 +37,7 @@ def test_embedding_requires_explicit_frozen_supported_runtime(field, value):
 
 def test_configuration_load_is_order_independent_but_fingerprint_tracks_each_domain(tmp_path):
     """JSON键顺序不影响谱系；模型或算法参数变化都必须改变配置指纹。"""
-    config = SemanticSettings(SemanticConfig(), EmbeddingConfig(device="cpu"))
+    config = SemanticSettings(CoherentSemanticConfig(), EmbeddingConfig(device="cpu"))
     file = tmp_path / "semantic.json"
     file.write_text(json.dumps(asdict(config), sort_keys=True), encoding="utf-8")
     first = load_semantic_settings(file)
@@ -45,7 +45,7 @@ def test_configuration_load_is_order_independent_but_fingerprint_tracks_each_dom
     file.write_text(json.dumps({"embedding": raw["embedding"], "algorithm": raw["algorithm"]}), encoding="utf-8")
     second = load_semantic_settings(file)
     assert first == second == config and first.fingerprint == second.fingerprint
-    assert replace(config, algorithm=replace(config.algorithm, window_tokens=32)).fingerprint != config.fingerprint
+    assert replace(config, algorithm=replace(config.algorithm, window_tokens=64)).fingerprint != config.fingerprint
     assert replace(config, embedding=replace(config.embedding, device="mps")).fingerprint != config.fingerprint
 
 

@@ -1,9 +1,9 @@
-"""experimental：在既有单元及评分上尝试独立意思边界，不继承正式规则身份。
+"""冻结连贯块分区核心，在既有单元及评分上选择完整介绍／推荐边界。
 
 本模块仅做纯计算；不访问文件、数据库、帖子身份、模型或向量缓存，不新增
 单元或伪造 embedding。调用者先用原有评分函数生成 SemanticDecision；窗口
 和阈值由调用者明确保存。结构题头可以主动提出边界，但句号、属性变化本身
-不会触发切分。结果仍是待人工复核的开发候选，不是独立可编码性的自动证明。
+不会触发切分。规则经用户采纳；运行结果仍须抽查，不能自动证明所有片段均可独立编码。
 无法在既有 gap 上表达的意思转换保留为限制，不能移动到句内相邻位置代替。
 """
 
@@ -16,11 +16,10 @@ import re
 from typing import Sequence
 import unicodedata
 
-from .contracts import SemanticDecision, TextSegment, TextUnit
+from .contracts import SemanticDecision, TextSegment, TextUnit, TokenCounter
 from .integrity import WHITE, validate
-from .semantic_config import SemanticConfig
+from .semantic_config import CoherentSemanticConfig
 from .semantic_coherence import discover_coherent_blocks
-from .semantic_partition import TokenCounter
 from .semantic_structure import (
     StructureBlock, analyze_gap_structure, discover_context_blocks,
     discover_structure_blocks,
@@ -301,11 +300,11 @@ def _checked_count(counter: TokenCounter, value: str) -> int:
 
 
 def _validate_input(text: str, units: Sequence[TextUnit], decision: SemanticDecision,
-                    config: SemanticConfig, counter: TokenCounter) -> None:
+                    config: CoherentSemanticConfig, counter: TokenCounter) -> None:
     """沿用公共原文与字素验收，并拒绝坏评分身份、非有限数和虚假计数。"""
-    if not isinstance(text, str) or not isinstance(config, SemanticConfig):
+    if not isinstance(text, str) or not isinstance(config, CoherentSemanticConfig):
         raise ValueError("invalid_meaning_input")
-    SemanticConfig.__post_init__(config)
+    CoherentSemanticConfig.__post_init__(config)
     validate(text, [dict(seg_id=i + 1, raw_text=text[u.start:u.end], start=u.start, end=u.end) for i, u in enumerate(units)])
     for unit in units:
         if not any(c not in WHITE for c in text[unit.start:unit.end]):
@@ -325,7 +324,7 @@ def _validate_input(text: str, units: Sequence[TextUnit], decision: SemanticDeci
 
 
 def _length_partition(text: str, units: Sequence[TextUnit], decision: SemanticDecision,
-                      config: SemanticConfig, counter: TokenCounter, cuts: Sequence[int],
+                      config: CoherentSemanticConfig, counter: TokenCounter, cuts: Sequence[int],
                       penalties: Sequence[tuple[int, int, int]], metadata_start: int | None) -> tuple[int, ...]:
     """对固定意思段执行全局硬长度分区，精确重计每一个可行原文区间。
 
@@ -380,7 +379,7 @@ def _length_partition(text: str, units: Sequence[TextUnit], decision: SemanticDe
 
 
 def partition_by_meaning(text: str, units: Sequence[TextUnit], decision: SemanticDecision,
-                         config: SemanticConfig, counter: TokenCounter) -> MeaningPartition:
+                         config: CoherentSemanticConfig, counter: TokenCounter) -> MeaningPartition:
     """以已评分 gap 构造实验意思片段，返回无损原文与逐 gap 选择理由。
 
     连贯父块优先保留完整介绍／推荐，子条目可独立编码不代表必须拆开。

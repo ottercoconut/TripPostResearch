@@ -11,32 +11,24 @@ from __future__ import annotations
 
 from bisect import bisect_left, bisect_right, insort
 from math import isfinite
-from typing import Protocol, Sequence
+from typing import Sequence
 
 import numpy as np
 import regex
 
-from .contracts import GapScore, SemanticDecision, TextSegment, TextUnit
+from .contracts import GapScore, SemanticDecision, TextSegment, TextUnit, TokenCounter
 from .integrity import WHITE
-from .semantic_config import SemanticConfig
+from .semantic_config import CoherentSemanticConfig
 
 
-class _TokenCounter(Protocol):
-    """只要求完整原文子串的精确正文token计数，不要求加载向量模型。"""
-
-    def count(self, text: str) -> int:
-        """返回不含指令模板的正文token数；不得截断或估算。"""
-        ...
-
-
-def _validate_config(config: SemanticConfig) -> None:
+def _validate_config(config: CoherentSemanticConfig) -> None:
     """委托配置自身防御性复验，避免在计算层另维护一份参数范围规则。"""
-    if not isinstance(config, SemanticConfig):
+    if not isinstance(config, CoherentSemanticConfig):
         raise ValueError("invalid_semantic_config_type")
-    SemanticConfig.__post_init__(config)
+    CoherentSemanticConfig.__post_init__(config)
 
 
-def _checked_count(counter: _TokenCounter, text: str) -> int:
+def _checked_count(counter: TokenCounter, text: str) -> int:
     """拒绝布尔值、负数和非整数计数；失败不回退到字符长度。"""
     count = counter.count(text)
     if type(count) is not int or count < 0 or (text and count == 0):
@@ -45,7 +37,7 @@ def _checked_count(counter: _TokenCounter, text: str) -> int:
 
 
 def _validate_units(
-    text: str, units: Sequence[TextUnit], counter: _TokenCounter
+    text: str, units: Sequence[TextUnit], counter: TokenCounter
 ) -> list[int]:
     """检查候选单元无损且token数可信，返回正文非空白字符数前缀和。
 
@@ -207,7 +199,7 @@ def _rank_candidates(
 
 def _semantic_cuts(
     units: Sequence[TextUnit], nonspace_prefix: Sequence[int], cohesion: Sequence[float],
-    depths: Sequence[float], config: SemanticConfig,
+    depths: Sequence[float], config: CoherentSemanticConfig,
 ) -> tuple[tuple[int, ...], tuple[GapScore, ...]]:
     """按谷值、余弦、原文位置排序尝试边界，逐次检查新增两侧段的最小长度。"""
     candidates = set(_valley_candidates(cohesion, config.epsilon))
@@ -234,7 +226,7 @@ def _semantic_cuts(
 
 def _length_cuts(
     text: str, units: Sequence[TextUnit], semantic_cuts: Sequence[int], gaps: Sequence[GapScore],
-    nonspace_prefix: Sequence[int], config: SemanticConfig, counter: _TokenCounter,
+    nonspace_prefix: Sequence[int], config: CoherentSemanticConfig, counter: TokenCounter,
 ) -> tuple[tuple[int, ...], bool]:
     """对完整原文子串精确重计，在硬上限内优先避免短尾段。
 
@@ -275,8 +267,8 @@ def _length_cuts(
 
 
 def choose_boundaries(
-    text: str, units: Sequence[TextUnit], vectors: object, config: SemanticConfig,
-    token_counter: _TokenCounter,
+    text: str, units: Sequence[TextUnit], vectors: object, config: CoherentSemanticConfig,
+    token_counter: TokenCounter,
 ) -> tuple[tuple[TextSegment, ...], SemanticDecision]:
     """从逐单元向量选择无重叠原文片段，返回可重放的完整gap决策。
 
