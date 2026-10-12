@@ -49,12 +49,13 @@ def assert_final_consistency(text, units, output):
     assert len(output.decision.gaps) == max(0, len(units) - 1)
 
 
-def test_legacy_configuration_keeps_exact_fields_and_saved_fingerprint():
+def test_legacy_configuration_keeps_exact_fields_and_saved_fingerprint(tmp_path):
     """固定历史配置摘要，防止给旧dataclass加默认字段而破坏已封存证据。"""
     fields = {"unit_max_tokens", "window_tokens", "absolute_cohesion_threshold", "depth_floor",
               "depth_std_factor", "min_segment_nonspace_chars", "max_segment_tokens", "epsilon", "smoothing"}
     assert set(asdict(SemanticConfig())) == fields
-    path = Path(__file__).resolve().parents[2] / "configs/text-segmentation-semantic.json"
+    path = tmp_path / "historical-config.json"
+    path.write_text(json.dumps(asdict(SemanticSettings(SemanticConfig(), EmbeddingConfig()))))
     settings = load_semantic_settings(path)
     assert type(settings.algorithm) is SemanticConfig
     assert settings.fingerprint == "b1bbabf69f20c0c65d87e8ded7e1f315eed37c007df79866a2c929b292638086"

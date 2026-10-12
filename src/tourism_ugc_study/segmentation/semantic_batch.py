@@ -157,6 +157,8 @@ def run_semantic_batch(
                         # 旧运行的trace结构保持不变；新规则的结构证据不进入单表摘要。
                         if result.structure_trace is not None:
                             trace_row["structure"] = asdict(result.structure_trace)
+                        if result.meaning_trace is not None:
+                            trace_row["meaning"] = asdict(result.meaning_trace)
                         traces.write(canonical_json(trace_row) + "\n")
                         ordered_input.update((canonical_json([post.source_post_id, post.source_version,
                                                              result.result.source_body_sha256]) + "\n").encode())

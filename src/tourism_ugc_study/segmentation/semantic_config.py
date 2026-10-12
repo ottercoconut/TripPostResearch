@@ -17,6 +17,10 @@ RULE_VERSION = "semantic-depth-ugc-0.1"
 IMPLEMENTATION_VERSION = "semantic-depth-ugc-0.1-original-1"
 STRUCTURED_RULE_VERSION = "semantic-depth-ugc-0.2"
 STRUCTURED_IMPLEMENTATION_VERSION = "semantic-depth-ugc-0.2-structure-global-1"
+COHERENT_RULE_VERSION = "semantic-coherent-ugc-1.0"
+COHERENT_IMPLEMENTATION_VERSION = "semantic-coherent-ugc-1.0-meaning-v4-1"
+COHERENT_PARTITION_ID = "experimental-meaning-units-4"
+CURRENT_FROZEN_SETTINGS_SHA256 = "cef1f8dd506b3ddd3a1a8b31171f7e4737da8d671a2afa405bb192fefb7d22da"
 RUN_KIND = "semantic-text-segmentation-run"
 
 
@@ -27,7 +31,8 @@ def validate_semantic_rule_identity(manifest: dict) -> None:
     汇总均可复用。缺失、未知或错配的身份抛 ValueError，不能静默解释为当前规则。
     """
     registered = ((RULE_VERSION, IMPLEMENTATION_VERSION),
-                  (STRUCTURED_RULE_VERSION, STRUCTURED_IMPLEMENTATION_VERSION))
+                  (STRUCTURED_RULE_VERSION, STRUCTURED_IMPLEMENTATION_VERSION),
+                  (COHERENT_RULE_VERSION, COHERENT_IMPLEMENTATION_VERSION))
     if not isinstance(manifest, dict):
         raise ValueError("semantic_rule_identity_mismatch")
     identity = (manifest.get("rule_version"), manifest.get("implementation_version"))
@@ -104,6 +109,27 @@ class StructuredSemanticConfig(SemanticConfig):
             raise ValueError("unknown_partition_length_strategy")
 
 
+@dataclass(frozen=True)
+class CoherentSemanticConfig(SemanticConfig):
+    """冻结的完整介绍／推荐块规则；默认参数等于用户采纳的v4运行。
+
+    只新增显式算法身份，不改旧配置字段或指纹。该身份表示采用同一确定性
+    规则，不代表每篇正文质量均经人工确认；参数变化仍进入配置摘要。
+    """
+
+    window_tokens: int = 32
+    depth_floor: float = 0.05
+    min_segment_nonspace_chars: int = 16
+    max_segment_tokens: int = 512
+    rule_version: str = COHERENT_RULE_VERSION
+
+    def __post_init__(self) -> None:
+        """拒绝非法参数及借用其他规则标签，不接受实验策略开关。"""
+        super().__post_init__()
+        if self.rule_version != COHERENT_RULE_VERSION:
+            raise ValueError("unknown_semantic_rule_version")
+
+
 def parse_algorithm_config(raw: object, require_complete: bool = False) -> SemanticConfig:
     """按显式规则恢复算法配置；旧无版本字段格式始终恢复为0.1。
 
@@ -115,9 +141,11 @@ def parse_algorithm_config(raw: object, require_complete: bool = False) -> Seman
         raise ValueError("semantic_config_fields_invalid:algorithm")
     cls = SemanticConfig
     if "rule_version" in raw:
-        if raw["rule_version"] != STRUCTURED_RULE_VERSION:
+        classes = {STRUCTURED_RULE_VERSION: StructuredSemanticConfig,
+                   COHERENT_RULE_VERSION: CoherentSemanticConfig}
+        if not isinstance(raw["rule_version"], str) or raw["rule_version"] not in classes:
             raise ValueError("unknown_semantic_rule_version")
-        cls = StructuredSemanticConfig
+        cls = classes[raw["rule_version"]]
     fields = set(cls.__dataclass_fields__)
     if set(raw) - fields or (require_complete and set(raw) != fields):
         raise ValueError("semantic_config_fields_invalid:algorithm")
@@ -127,7 +155,7 @@ def parse_algorithm_config(raw: object, require_complete: bool = False) -> Seman
 def semantic_rule_identity(config: SemanticConfig) -> tuple[str, str]:
     """返回已登记配置类的规则／实现配对，同时防御性复验配置。
 
-    仅接受这两个确切类型，避免未登记子类借0.1身份携带额外行为。
+    仅接受登记的确切类型，避免未登记子类借旧身份携带额外行为。
     实现身份属于算法；模型身份仍由EmbeddingConfig及provider独立绑定。
     """
     if type(config) is SemanticConfig:
@@ -136,6 +164,9 @@ def semantic_rule_identity(config: SemanticConfig) -> tuple[str, str]:
     if type(config) is StructuredSemanticConfig:
         StructuredSemanticConfig.__post_init__(config)
         return STRUCTURED_RULE_VERSION, STRUCTURED_IMPLEMENTATION_VERSION
+    if type(config) is CoherentSemanticConfig:
+        CoherentSemanticConfig.__post_init__(config)
+        return COHERENT_RULE_VERSION, COHERENT_IMPLEMENTATION_VERSION
     raise ValueError("invalid_semantic_config_type")
 
 
@@ -176,6 +207,19 @@ class SemanticSettings:
     def fingerprint(self) -> str:
         """返回规范化配置摘要，不是完成运行后的batch_id。"""
         return hashlib.sha256(json.dumps(asdict(self), sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+
+
+def validate_current_frozen_settings(settings: SemanticSettings) -> None:
+    """新生成入口只接受用户采纳的完整算法、模型与运行参数组合。
+
+    登记摘要独立于外部JSON，修改配置文件不能同时改写核验基准。纯计算、
+    历史读取和实验重放仍可显式参数化，不把该门加入一般配置解析器。
+    身份、参数或模型漂移均抛ValueError，调用者须在读取正文前执行。
+    """
+    if (type(settings) is not SemanticSettings
+            or type(settings.algorithm) is not CoherentSemanticConfig
+            or settings.fingerprint != CURRENT_FROZEN_SETTINGS_SHA256):
+        raise ValueError("current_frozen_settings_mismatch")
 
 
 def load_semantic_settings(path: Path) -> SemanticSettings:

@@ -108,7 +108,7 @@ def test_change_during_read_is_detected(tmp_path):
 
 
 def test_config_and_cli_are_location_independent(tmp_path):
-    """配置路径相对配置文件，CLI在别的工作目录仍正确绑定配对输入。"""
+    """来源相对配置文件；CLI省略算法须拒绝，不能退回旧客观生成路径。"""
     config = make_input(tmp_path)
     settings = tmp_path / "config.json"
     settings.write_text(json.dumps({"membership_db": config.membership_db.name,
@@ -119,4 +119,5 @@ def test_config_and_cli_are_location_independent(tmp_path):
     completed = subprocess.run([sys.executable, str(script), "--config", str(settings),
         "--output", str(tmp_path / "cli-run")], cwd=tmp_path, text=True, capture_output=True)
     assert completed.returncode == 2, completed.stderr
-    assert json.loads(completed.stdout)["counts"]["post_count"] == 4
+    assert "--algorithm-config" in completed.stderr
+    assert not (tmp_path / "cli-run").exists()

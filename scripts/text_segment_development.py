@@ -46,7 +46,7 @@ def main() -> int:
             value = verify_frozen_development_run(source, args.verify_run, args.output,
                 frozen_input=args.frozen_input, members=args.members)
         else:
-            settings = load_semantic_settings(args.algorithm_config or ROOT / "configs/text-segmentation-semantic.json")
+            settings = load_semantic_settings(args.algorithm_config or ROOT / "configs/text-segmentation-semantic-8b-coherent.json")
             value = (verify_development_sample(source, args.members, args.output, settings=settings) if args.members else
                      prepare_development_sample(source, args.output, settings=settings,
                         progress=lambda done, total: print(f"已核查候选单元 {done}/{total}", file=sys.stderr, flush=True)))
