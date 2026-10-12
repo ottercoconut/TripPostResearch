@@ -1,6 +1,7 @@
 """向量输入、末 token pooling、身份与无截断契约的确定性验证。"""
 
 from types import SimpleNamespace
+import json
 
 import numpy as np
 import pytest
@@ -69,6 +70,103 @@ def test_asset_change_is_rejected(tmp_path):
     asset.write_bytes(b"changed")
     with pytest.raises(EmbeddingError, match="model_asset_changed"):
         counter.verify_assets(strong=False)
+
+
+@pytest.mark.parametrize("change_phase", ["after_read", "after_bind", "stable"])
+def test_sharded_index_change_cannot_certify_unbound_loaded_weights(tmp_path, monkeypatch, change_phase):
+    """列出分片后换索引，不能用新索引摘要与旧分片摘要证明实际新权重。
+
+    资产为临时合成字节，loader只读取分片名和参数元数据，不运行模型。
+    读取后或绑定后替换文件，必须由已有资产变化门拒绝返回provider；
+    稳定分片作为对照，必须全部进入身份。旧实现的读取后竞态会成功且
+    强复核通过，但最后的实际分片绑定断言失败。
+    """
+    import torch
+    import transformers
+    import huggingface_hub
+    from pathlib import Path
+
+    revision = "a" * 40
+    index = tmp_path / "model.safetensors.index.json"
+    old_shard, new_shard = "old-part.safetensors", "new-part.safetensors"
+    index.write_text(json.dumps({"weight_map": {"weight": old_shard}}))
+    for name in (old_shard, new_shard):
+        (tmp_path / name).write_bytes(name.encode())
+    original_read = Path.read_text
+    original_bind = QwenTokenCounter._bind_assets
+    replaced = False
+    loaded = []
+
+    def read_index_then_replace(path, *args, **kwargs):
+        """返回原清单，随后换成另一有效清单，制造真实文件身份漂移。"""
+        nonlocal replaced
+        raw = original_read(path, *args, **kwargs)
+        if path == index and not replaced and change_phase == "after_read":
+            replaced = True
+            index.write_text(json.dumps({"weight_map": {"weight": new_shard}}))
+        return raw
+
+    def bind_then_replace(self, names):
+        """另一反例在索引已绑定后换文件，不能重新接受漂移后的身份。"""
+        nonlocal replaced
+        original_bind(self, names)
+        if index.name in names and not replaced and change_phase == "after_bind":
+            replaced = True
+            index.write_text(json.dumps({"weight_map": {"weight": new_shard}}))
+
+    def synthetic_counter(self, **kwargs):
+        """只替换tokenizer初始化；保留真实资产绑定与复验实现。"""
+        self._asset_paths, self._asset_stats = {}, {}
+        self._asset_kwargs = {name: kwargs[name] for name in
+                              ("model_id", "revision", "local_files_only", "cache_dir")}
+        self.identity = {"dimension": 4096, "assets_sha256": {}, "dependencies": {}}
+
+    class MetadataModel:
+        """只提供加载后校验需要的实际参数元数据，没有forward接口。"""
+
+        config = SimpleNamespace(_commit_hash=revision, use_cache=False)
+
+        def to(self, device):
+            """合成对象固定在CPU，不分配模型参数。"""
+            return self
+
+        def eval(self):
+            """保留provider初始化接口，不执行推理。"""
+            return self
+
+        def parameters(self):
+            """返回CPU／FP32元数据，使验收能够到达资产漂移检查。"""
+            return [SimpleNamespace(dtype=torch.float32, device=torch.device("cpu"))]
+
+    def load_declared_weights(*args, **kwargs):
+        """像加载器一样重新读当前索引，记录其实际选择的分片。"""
+        names = json.loads(original_read(index))["weight_map"].values()
+        for name in names:
+            assert (tmp_path / name).read_bytes() == name.encode()
+            loaded.append(name)
+        return MetadataModel()
+
+    monkeypatch.setattr(QwenTokenCounter, "__init__", synthetic_counter)
+    monkeypatch.setattr(QwenTokenCounter, "_bind_assets", bind_then_replace)
+    monkeypatch.setattr(huggingface_hub, "hf_hub_download",
+                        lambda model_id, name, **kwargs: str(tmp_path / name))
+    monkeypatch.setattr(transformers.AutoModel, "from_pretrained", load_declared_weights)
+    monkeypatch.setattr(Path, "read_text", read_index_then_replace)
+    try:
+        provider = QwenEmbeddingProvider(model_id="Qwen/Qwen3-Embedding-8B",
+            revision=revision, device="cpu", dtype="float32", batch_size=1)
+    except EmbeddingError as exc:
+        assert change_phase != "stable" and replaced
+        assert str(exc) == "model_asset_changed"
+        assert loaded == [new_shard]
+        return
+
+    # 旧实现会到这里，而且strong=True仍通过；实际加载分片必须全部有摘要。
+    provider.verify_assets()
+    assert loaded == [old_shard if change_phase == "stable" else new_shard]
+    assert set(loaded) <= set(provider.identity["assets_sha256"])
+    assert change_phase == "stable"
+    assert set(provider.identity["assets_sha256"]) == {index.name, old_shard}
 
 
 def _fake_provider():

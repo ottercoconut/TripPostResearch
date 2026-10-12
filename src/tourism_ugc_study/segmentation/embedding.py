@@ -279,17 +279,19 @@ class QwenEmbeddingProvider(QwenTokenCounter):
         if device == "mps":
             # 本机统一内存同时服务系统；任何调用入口都保留保护上限。
             torch.mps.set_per_process_memory_fraction(0.5)
-        from huggingface_hub import hf_hub_download
         from huggingface_hub.errors import EntryNotFoundError, LocalEntryNotFoundError
 
         try:
-            index = hf_hub_download(model_id, "model.safetensors.index.json", revision=revision,
-                                    local_files_only=True, cache_dir=cache_dir)
+            self._bind_assets(("model.safetensors.index.json",))
         except (EntryNotFoundError, LocalEntryNotFoundError):
             self._bind_assets(("model.safetensors",))
         else:
-            weight_names = sorted(set(json.loads(Path(index).read_text())["weight_map"].values()))
-            self._bind_assets(("model.safetensors.index.json", *weight_names))
+            # 先绑定索引，再从同一已绑定路径列出分片；否则索引读取后换文件
+            # 会留下“新索引摘要＋旧分片摘要”，无法证明实际加载的新权重。
+            # 绑定之后的变化仍由既有加载后资产复验拒绝，不重新接受新身份。
+            index = self._asset_paths["model.safetensors.index.json"]
+            weight_names = sorted(set(json.loads(index.read_text())["weight_map"].values()))
+            self._bind_assets(weight_names)
         self.device, self.batch_size = device, batch_size
         self.model = AutoModel.from_pretrained(
             model_id, revision=revision, local_files_only=local_files_only,
