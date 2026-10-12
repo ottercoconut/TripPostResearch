@@ -483,3 +483,28 @@ def test_complete_exclamation_location_noun_and_line_break_do_not_get_adverb_pro
     """地理名词、的字感叹、跨行及完整引语不按末字统一判为状语断裂。"""
     text, units = _units([left, right], separator)
     assert not any(block.kind == 'syntactic_continuation' for block in discover_context_blocks(text, units))
+
+
+def test_heading_only_document_does_not_repeatedly_read_all_heading_prefixes():
+    """无说明的短标题表不产生块；读取工作随输入线性增长，不依赖墙钟阈值。"""
+    class ObservedText(str):
+        """统计向原文索取的切片字符量，捕获重复扫描而不窥探算法内部状态。"""
+        def __new__(cls, value):
+            instance = super().__new__(cls, value)
+            instance.sliced_codepoints = 0
+            return instance
+
+        def __getitem__(self, key):
+            value = super().__getitem__(key)
+            if isinstance(key, slice):
+                self.sliced_codepoints += len(value)
+            return value
+
+    measurements = []
+    for count in (100, 200):
+        text, units = _units(["山间风景"] * count, "\n")
+        observed = ObservedText(text)
+        assert discover_context_blocks(observed, units) == ()
+        measurements.append(observed.sliced_codepoints)
+    assert measurements[0] > 0
+    assert measurements[1] <= 3 * measurements[0]

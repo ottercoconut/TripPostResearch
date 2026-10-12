@@ -446,14 +446,21 @@ def discover_context_blocks(text: str, units: Sequence[TextUnit]) -> tuple[Struc
     lines = _context_lines(text)
     nonempty = [index for index, line in enumerate(lines) if line.start < line.end]
     headings = {index: _context_heading(text[lines[index].start:lines[index].end]) for index in nonempty}
+    sizes = {index: sum(c not in WHITE for c in text[lines[index].start:lines[index].end])
+             for index in nonempty}
+    # 没有足够长的后继说明时，任何题头起点都不可能产出块。避免连续短
+    # 标题在每个起点重复扫到文末；元数据尾部和局部句法块仍在下方处理。
+    last_possible_body = max((position for position, index in enumerate(nonempty)
+                              if sizes[index] >= 24 and not headings[index][1]), default=-1)
     output: list[StructureBlock] = []
     position = 0
-    while position < len(nonempty):
+    while position < last_possible_body:
         index = nonempty[position]
         if not headings[index][0]:
             position += 1
             continue
         chain = [index]
+        max_unmarked_size = sizes[index] if not headings[index][1] else 0
         cursor = position + 1
         body_index: int | None = None
         lead_start: int | None = None
@@ -463,12 +470,10 @@ def discover_context_blocks(text: str, units: Sequence[TextUnit]) -> tuple[Struc
             value = text[line.start:line.end]
             if _metadata_line(value) or _tail_metadata_line(value):
                 break
-            size = sum(c not in WHITE for c in value)
-            unmarked_sizes = [sum(c not in WHITE for c in text[lines[i].start:lines[i].end])
-                              for i in chain if not headings[i][1]]
+            size = sizes[candidate]
             if (size >= 24 and not headings[candidate][1]
                     and any(unicodedata.category(c)[0] in {"L", "N"} for c in value)
-                    and all(size > prior_size for prior_size in unmarked_sizes)):
+                    and size > max_unmarked_size):
                 body_index = candidate
                 break
             if (not headings[candidate][0] and size < 12 and any(c in _STRONG for c in value)
@@ -482,6 +487,9 @@ def discover_context_blocks(text: str, units: Sequence[TextUnit]) -> tuple[Struc
             if not headings[candidate][0]:
                 break
             chain.append(candidate)
+            if not headings[candidate][1]:
+                # 与逐项all(size > prior_size)等价，不反复读取完整题头链。
+                max_unmarked_size = max(max_unmarked_size, size)
             cursor += 1
         if body_index is not None:
             first_sentence = _context_lead_span(
