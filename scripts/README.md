@@ -16,7 +16,7 @@ cleaning_run_remote_research_round.py # 已完成AutoDL每批500条回传、验�
 cleaning_assemble_research_round.py # 完整验收后装配候选，不发布正式keep
 cleaning_complete_research_round.py # 同轮等待完成与后处理，不重启模型
 cleaning_freeze_research_data.py  # prepare/seal/verify：原始内容、媒体和完成候选封存
-text_segment_research.py         # 默认客观路径；显式算法配置启用受监督语义候选，Linux另需资源策略
+text_segment_research.py         # 必须显式指定当前连贯块配置；受监督语义切分，Linux另需资源策略
 text_segment_database.py         # 单表导入/全量核验/随机抽查；支持独立抽查排除清单
 text_embedding_probe.py          # 默认0.6B CPU/MPS smoke；显式配置支持Linux/CUDA合成验证
 text_segment_development.py      # 开发抽样/单元核验、离线输入导出、回传run对本地来源复核
@@ -41,7 +41,7 @@ cleaning_predict_tourism_relevance.py # 唯一生产入口：CSV纯预测、共�
 cleaning_retrain_routing_model.py # 已完成1,300条重训、路由与审计谱系的历史复现入口
 ```
 
-切分命令的当前用法见[语义适配协议](../docs/protocols/语义文本切分适配与验证方案.md#s11)，状态和私有证据见[总备忘录B05](../docs/planning/研究问题与待办总备忘录.md#b05固定编码单位与客观切分工程接入)；此清单只用于发现入口。
+切分命令的当前用法见[语义适配协议](../docs/protocols/语义文本切分适配与验证方案.md#s11)，状态和私有证据见[总备忘录B05](../docs/planning/研究问题与待办总备忘录.md#b05embedding自然语义分段与工程接入)；此清单只用于发现入口。
 
 ## 唯一生产推理入口
 

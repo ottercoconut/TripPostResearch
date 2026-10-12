@@ -1,7 +1,7 @@
-"""按显式算法配置分派纯边界计算，保持0.1重放与0.2开发规则隔离。
+"""按显式算法配置分派纯边界计算，隔离历史重放与当前连贯块规则。
 
-本层不读取模型、缓存、数据库或帖子ID。旧配置完整返回旧边界器结果；
-0.2复用同一评分，再以结构分区重建最终决策。结构证据独立保存，不向旧
+本层不读取模型、缓存、数据库或帖子ID。历史配置保持原结果；当前规则
+复用同一评分，再由已采纳v4分区器产生结果。来源证据独立保存，不向旧
 SemanticDecision或逐帖summary增加字段，也不将结构罚分称为质量金标。
 """
 
@@ -13,9 +13,11 @@ from typing import Protocol, Sequence
 from .contracts import SemanticDecision, TextSegment, TextUnit
 from .integrity import WHITE
 from .semantic_boundaries import choose_boundaries
-from .semantic_config import SemanticConfig, StructuredSemanticConfig, semantic_rule_identity
+from .semantic_config import (COHERENT_PARTITION_ID, CoherentSemanticConfig, SemanticConfig,
+                              StructuredSemanticConfig, semantic_rule_identity)
+from .semantic_meaning import MeaningGapDecision, MeaningPartition, partition_by_meaning
 from .semantic_partition import BlockRelaxation, partition_with_structure
-from .semantic_structure import GapStructure
+from .semantic_structure import GapStructure, StructureBlock
 
 
 class BoundaryTokenCounter(Protocol):
@@ -49,16 +51,88 @@ class StructureTrace:
 
 
 @dataclass(frozen=True)
+class MeaningTrace:
+    """冻结v4的完整边界来源，独立于兼容发布摘要保存。
+
+    semantic_boundaries和structural_boundaries为原算法来源，可重叠；最终
+    SemanticDecision.semantic_boundaries则是二者并集，只计一次非长度切点。
+    此处保留原实验身份、初始评分和全部保护证据，不修改原算法返回值。
+    """
+
+    experiment_id: str
+    initial_decision: SemanticDecision
+    semantic_boundaries: tuple[int, ...]
+    structural_boundaries: tuple[int, ...]
+    length_boundaries: tuple[int, ...]
+    suppressed_semantic_boundaries: tuple[int, ...]
+    forced_structure_boundaries: tuple[int, ...]
+    gap_decisions: tuple[MeaningGapDecision, ...]
+    protected_blocks: tuple[StructureBlock, ...]
+    unavailable_structural_spans: tuple[tuple[str, int, int], ...]
+
+
+@dataclass(frozen=True)
 class SemanticDispatchResult:
     """同一配置执行的完整片段、最终决策与可选结构证据。
 
-    片段和decision必须描述同一组切点；0.1的structure_trace固定为None。
+    片段和decision必须描述同一组切点；两种trace仅按各自配置提供，0.1均为空。
     失败沿用领域ValueError或系统EmbeddingError，不返回部分成功结果。
     """
 
     segments: tuple[TextSegment, ...]
     decision: SemanticDecision
     structure_trace: StructureTrace | None = None
+    meaning_trace: MeaningTrace | None = None
+
+
+def _coherent_result(initial: SemanticDecision, partition: MeaningPartition,
+                     config: CoherentSemanticConfig, unit_count: int) -> SemanticDispatchResult:
+    """适配冻结结果到既有发布契约，不重新选点或改动正文跨度。
+
+    非长度来源取并集以避免重叠计数；真实来源全部保存在MeaningTrace。
+    gap.selected、最终状态和摘要均跟随最终片段，不沿用临时长度选择。
+    """
+    if partition.experiment_id != COHERENT_PARTITION_ID:
+        raise ValueError("coherent_partition_identity_mismatch")
+    nonlength = tuple(sorted(set(partition.semantic_boundaries) | set(partition.structural_boundaries)))
+    lengths = set(partition.length_boundaries)
+    selected = set(nonlength) | lengths
+    if set(nonlength) & lengths:
+        raise ValueError("coherent_boundary_categories_overlap")
+    gaps = []
+    for gap in initial.gaps:
+        reason = gap.reason.removeprefix("length_limit_after_")
+        if gap.index in lengths:
+            reason = "meaning_hard_token_limit"
+        elif gap.index in selected:
+            reason = "meaning_boundary_selected"
+        elif gap.index in partition.suppressed_semantic_boundaries:
+            reason = "meaning_boundary_suppressed"
+        gaps.append(replace(gap, selected=gap.index in selected, reason=reason))
+    if unit_count <= 1:
+        status = "empty" if unit_count == 0 else "single_unit"
+        reasons = ["empty_text" if unit_count == 0 else "single_unit"]
+    else:
+        status = "scored_split" if nonlength else "scored_keep"
+        reasons = ["meaning_boundary_selected" if nonlength else "no_meaning_boundary"]
+    if lengths:
+        status = "length_split"
+        reasons.append("max_segment_tokens")
+        if any(sum(char not in WHITE for char in segment.raw_text) < config.min_segment_nonspace_chars
+               for segment in partition.segments):
+            reasons.append("short_segment_due_to_limit")
+    if partition.suppressed_semantic_boundaries:
+        reasons.append("meaning_semantic_boundary_suppressed")
+    if partition.forced_structure_boundaries:
+        reasons.append("forced_structure_boundary")
+    if partition.unavailable_structural_spans:
+        reasons.append("structural_boundary_unavailable")
+    decision = SemanticDecision(status, tuple(reasons), tuple(gaps), nonlength, partition.length_boundaries)
+    trace = MeaningTrace(partition.experiment_id, initial, partition.semantic_boundaries,
+                         partition.structural_boundaries, partition.length_boundaries,
+                         partition.suppressed_semantic_boundaries, partition.forced_structure_boundaries,
+                         partition.gap_decisions, partition.protected_blocks, partition.unavailable_structural_spans)
+    return SemanticDispatchResult(partition.segments, decision, meaning_trace=trace)
 
 
 def choose_semantic_boundaries(
@@ -71,11 +145,16 @@ def choose_semantic_boundaries(
     端点字素安全、计数精确；N≥2要求有效逐单元向量，N≤1不虚构评分。
     0.1不改其片段或决策。0.2仅重新分区既有gap，硬长度优先于结构偏好，
     被抑制语义点、被迫结构切断和初始决策在独立trace中留证。
+    当前连贯块规则原样调用v4分区器，只将语义／结构来源的并集适配为
+    发布契约中的非长度边界；原始来源和初始决策另写meaning_trace。
     """
     semantic_rule_identity(config)
     segments, initial = choose_boundaries(text, units, vectors, config, counter)
     if type(config) is SemanticConfig:
         return SemanticDispatchResult(segments, initial)
+    if type(config) is CoherentSemanticConfig:
+        return _coherent_result(initial, partition_by_meaning(text, units, initial, config, counter),
+                                config, len(units))
     # 配置身份已限定确切登记类型；避免未知子类意外进入新算法。
     if type(config) is not StructuredSemanticConfig:
         raise ValueError("invalid_semantic_config_type")

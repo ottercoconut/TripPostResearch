@@ -26,7 +26,8 @@ from .embedding import QwenTokenCounter, identity_sha256
 from .embedding_cache import EmbeddingCache
 from .integrity import WHITE, validate
 from .semantic_dispatch import choose_semantic_boundaries
-from .semantic_config import SemanticConfig, SemanticSettings, StructuredSemanticConfig, parse_semantic_settings
+from .semantic_config import (CoherentSemanticConfig, SemanticConfig, SemanticSettings,
+                              StructuredSemanticConfig, parse_semantic_settings)
 from .semantic_development_input import FrozenDevelopmentInput
 from .semantic_evaluation import (validate_counter_settings, validate_development_run,
                                   validate_development_units)
@@ -120,10 +121,10 @@ def _boundary_result(case: dict, vectors, config: SemanticConfig, counter) -> tu
 
 
 def _boundary_calculation(case: dict, vectors, config: SemanticConfig, counter) -> tuple[list[dict] | None, dict, float, dict | None]:
-    """执行纯边界规则并保留独立结构证据；系统性embedding错误向上终止。
+    """执行纯边界规则并保留独立来源证据；系统性embedding错误向上终止。
 
     领域失败无部分片段或结构trace，行为与运行API一致。decision并入冻结
-    单元诊断，structure的initial_decision仍保持纯评分层原始身份。
+    单元诊断，structure或meaning的initial_decision仍保持纯评分层原始身份。
     """
     started = time.monotonic()
     structure = None
@@ -135,6 +136,8 @@ def _boundary_calculation(case: dict, vectors, config: SemanticConfig, counter) 
         validate(case["source_text"], records)
         if calculated.structure_trace is not None:
             structure = json.loads(canonical_json(asdict(calculated.structure_trace)))
+        if calculated.meaning_trace is not None:
+            structure = json.loads(canonical_json(asdict(calculated.meaning_trace)))
     except EmbeddingError:
         raise
     except ValueError as exc:
@@ -152,15 +155,33 @@ def _structure_replay(original: object, replayed: dict | None) -> dict:
     只有初始决策中的两种评分适用既有末位容差；结构跨度、原因、策略、
     超限退让及其token数均要求严格类型和值一致。失败路径两侧都须为None。
     """
+    return _evidence_replay(original, replayed, kind="structure")
+
+
+def _evidence_replay(original: object, replayed: dict | None, *, kind: str) -> dict:
+    """复验独立解释的全部非评分字段，不能用外层SHA替代真实算法重放。
+
+    历史structure和当前meaning分别使用独立键及错误身份；只有初始评分
+    允许既定末位容差，边界来源、保护块和逐gap理由均要求严格相同。
+    """
     if original is None and replayed is None:
-        return {"structure_exact": True}
+        return {f"{kind}_exact": True}
     if (type(original) is not dict or type(replayed) is not dict
             or original.keys() != replayed.keys() or "initial_decision" not in replayed
             or not all(_strict_json_equal(original[key], replayed[key])
                        for key in replayed if key != "initial_decision")):
-        raise ValueError("comparison_structure_reproduction_failed")
+        raise ValueError(f"comparison_{kind}_reproduction_failed")
     initial = _baseline_decision_replay(original["initial_decision"], replayed["initial_decision"])
-    return {"structure_exact": initial["decision_exact"], "initial_decision_replay": initial}
+    return {f"{kind}_exact": initial["decision_exact"], "initial_decision_replay": initial}
+
+
+def _evidence_key(config: SemanticConfig) -> str | None:
+    """按显式配置选择独立trace键，不凭缺失字段猜测算法身份。"""
+    if type(config) is CoherentSemanticConfig:
+        return "meaning"
+    if type(config) is StructuredSemanticConfig:
+        return "structure"
+    return None
 
 
 def _case_record(case: dict, segments: list[dict] | None, decision: dict, *, config_id: str,
@@ -236,9 +257,10 @@ def compare_semantic_configs(source: ResearchInput, members: Path, run: Path, ou
         if vector_hash != trace["summary"].get("vector_content_sha256"):
             raise ValueError("comparison_run_vector_digest_mismatch")
         structure_evidence = {}
-        if isinstance(settings.algorithm, StructuredSemanticConfig):
+        evidence_key = _evidence_key(settings.algorithm)
+        if evidence_key is not None:
             segments, decision, _, structure = _boundary_calculation(case, vectors, settings.algorithm, counter)
-            structure_evidence = _structure_replay(trace.get("structure"), structure)
+            structure_evidence = _evidence_replay(trace.get(evidence_key), structure, kind=evidence_key)
         else:
             segments, decision, _ = _boundary_result(case, vectors, settings.algorithm, counter)
         if not _strict_json_equal(segments, record["text_segments"]):
@@ -260,8 +282,8 @@ def compare_semantic_configs(source: ResearchInput, members: Path, run: Path, ou
             elapsed=record.get("boundary_seconds"), counter=counter, targeted=targeted))
         # trace计时覆盖候选、向量与边界；不能挪作纯边界耗时。
         baseline_rows[-1]["processing_seconds"] = trace.get("processing_seconds")
-        if isinstance(settings.algorithm, StructuredSemanticConfig) and trace.get("structure") is not None:
-            baseline_rows[-1]["structure"] = trace["structure"]
+        if evidence_key is not None and trace.get(evidence_key) is not None:
+            baseline_rows[-1][evidence_key] = trace[evidence_key]
     if any(sum(row[key] for row in baseline_rows) != manifest["counts"][key]
            for key in ("embedded_unit_count", "cache_hit_count", "model_call_count")):
         raise ValueError("comparison_run_aggregate_counts_mismatch")
@@ -286,7 +308,7 @@ def compare_semantic_configs(source: ResearchInput, members: Path, run: Path, ou
             for case in frozen.cases:
                 vectors = vectors_by_post[case["source_post_id"]]
                 structure = None
-                if isinstance(config, StructuredSemanticConfig):
+                if _evidence_key(config) is not None:
                     segments, decision, elapsed, structure = _boundary_calculation(case, vectors, config, counter)
                 else:
                     segments, decision, elapsed = _boundary_result(case, vectors, config, counter)
@@ -296,7 +318,7 @@ def compare_semantic_configs(source: ResearchInput, members: Path, run: Path, ou
                     cache_hits=len(case["units"]) if vectors is not None else 0, model_calls=0,
                     elapsed=elapsed, counter=counter, targeted=targeted))
                 if structure is not None:
-                    rows[-1]["structure"] = structure
+                    rows[-1][_evidence_key(config)] = structure
             for row, baseline in zip(rows, baseline_rows, strict=True):
                 row.update({"baseline_config_id": baseline_config_id, "baseline_segments": baseline["segments"],
                             "baseline_boundaries": baseline["new_boundaries"], "baseline_decision": baseline["decision"]})

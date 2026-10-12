@@ -108,6 +108,9 @@ class SemanticDecision:
 
     status区分empty/single_unit/scored_keep/scored_split/length_split/failed；
     本结构不改变SegmentationResult.reason_code的正文投影含义。
+    当前semantic-coherent规则的semantic_boundaries沿用发布字段名，表示
+    全部非长度切点（语义与结构来源的并集）；具体来源在MeaningTrace中
+    分别保存。两类最终边界互斥，历史规则的字段和值不作追溯改写。
     """
 
     status: str

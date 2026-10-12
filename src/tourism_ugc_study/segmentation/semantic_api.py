@@ -16,7 +16,7 @@ from .embedding_cache import EmbeddingCache
 from .integrity import validate
 from .projection import PROJECTION_ID, project_structured_text
 from .semantic_config import SemanticConfig, semantic_rule_identity
-from .semantic_dispatch import StructureTrace, choose_semantic_boundaries
+from .semantic_dispatch import MeaningTrace, StructureTrace, choose_semantic_boundaries
 from .semantic_units import build_units
 
 
@@ -28,6 +28,8 @@ class SemanticOutput:
     计数，embedded_unit_count按参与评分单元计数，缓存命中仍属于语义参与。
     structure_trace仅0.2成功时提供；调用方写trace时须省略None，保持旧运行
     字段不变。summary始终只使用最终decision，不混入结构或初始临时决策。
+    meaning_trace仅当前连贯块规则成功时提供，保存原始语义／结构来源；
+    两种trace不会同时出现，投影或领域失败时均为None。
     """
 
     result: SegmentationResult
@@ -39,9 +41,14 @@ class SemanticOutput:
     cache_hit_count: int
     model_call_count: int
     structure_trace: StructureTrace | None = None
+    meaning_trace: MeaningTrace | None = None
 
     def summary(self) -> dict:
-        """不含原文的紧凑诊断；投影reason_code保持原用途。"""
+        """不含原文的紧凑诊断；当前规则的semantic计数包括结构来源的非长度点。
+
+        两类来源重叠只计一次，纯语义／结构来源另见meaning_trace；历史摘要
+        字段保持不变。投影reason_code继续只说明正文投影，不评价切分质量。
+        """
         return {
             "decision": self.decision.status, "reason_codes": list(self.decision.reason_codes),
             "unit_count": len(self.units), "candidate_gap_count": max(0, len(self.units) - 1),
@@ -77,6 +84,7 @@ def segment_body_semantic(
     vector_hash = None
     embedded_count = 0
     structure_trace = None
+    meaning_trace = None
     decision = SemanticDecision("failed", (reason,), (), (), ())
     hits_before = cache.cache_hit_count if cache else 0
     calls_before = getattr(provider, "model_call_count", 0)
@@ -101,12 +109,14 @@ def segment_body_semantic(
                 selected = choose_semantic_boundaries(source, units, vectors, config, token_counter)
                 segments, decision = selected.segments, selected.decision
                 structure_trace = selected.structure_trace
+                meaning_trace = selected.meaning_trace
                 validate(source, [asdict(s) for s in segments])
             except EmbeddingError:
                 raise
             except ValueError as exc:
                 segments = None
                 structure_trace = None
+                meaning_trace = None
                 decision = SemanticDecision("failed", (str(exc),), (), (), ())
             else:
                 codes = tuple(dict.fromkeys((*built.diagnostics, *decision.reason_codes)))
@@ -125,4 +135,4 @@ def segment_body_semantic(
     )
     return SemanticOutput(result, units, decision, model_hash, vector_hash, embedded_count,
                           (cache.cache_hit_count - hits_before) if cache else 0,
-                          getattr(provider, "model_call_count", 0) - calls_before, structure_trace)
+                          getattr(provider, "model_call_count", 0) - calls_before, structure_trace, meaning_trace)

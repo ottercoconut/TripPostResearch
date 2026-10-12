@@ -254,11 +254,82 @@ def test_research_cli_never_prints_runtime_exception_text(tmp_path, monkeypatch,
     monkeypatch.setattr(semantic_runtime, "run_guarded_semantic_batch",
                         lambda *args, **kwargs: (_ for _ in ()).throw(exception))
     monkeypatch.setattr(sys, "argv", ["text_segment_research.py", "--output", str(tmp_path / "output"),
-                                     "--algorithm-config", str(root / "configs/text-segmentation-semantic.json")])
+                                     "--algorithm-config", str(root / "configs/text-segmentation-semantic-8b-coherent.json")])
     assert cli.main() == 1
     captured = capsys.readouterr()
     assert RAW_MARKER not in captured.out + captured.err and "Traceback" not in captured.err
     assert type(exception).__name__ in captured.err
+
+
+@pytest.mark.parametrize("structured", [False, True])
+def test_research_cli_rejects_retired_generation_before_reading_source(tmp_path, monkeypatch, capsys, structured):
+    """旧身份只作兼容核验；新生成入口在接触正文与模型前拒绝旧规则。"""
+    from tourism_ugc_study.segmentation.semantic_config import (
+        EmbeddingConfig, SemanticConfig, SemanticSettings, StructuredSemanticConfig,
+    )
+    root = Path(semantic_runtime.__file__).resolve().parents[3]
+    spec = importlib.util.spec_from_file_location("retired_research_cli_test", root / "scripts/text_segment_research.py")
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+    def forbidden(*args, **kwargs):
+        raise AssertionError("retired rule must fail before corpus or model access")
+    monkeypatch.setattr(cli, "load_research_input", forbidden)
+    monkeypatch.setattr(semantic_runtime, "run_guarded_semantic_batch", forbidden)
+    algorithm = StructuredSemanticConfig() if structured else SemanticConfig()
+    config = tmp_path / "historical.json"
+    config.write_text(json.dumps(asdict(SemanticSettings(algorithm, EmbeddingConfig()))))
+    monkeypatch.setattr(sys, "argv", ["text_segment_research.py", "--output", str(tmp_path / "output"),
+                                     "--algorithm-config", str(config)])
+    assert cli.main() == 1
+    assert "ValueError" in capsys.readouterr().err
+    assert not (tmp_path / "output").exists()
+
+
+@pytest.mark.parametrize("section,field,value", [
+    ("algorithm", "window_tokens", 128),
+    ("algorithm", "absolute_cohesion_threshold", 0.65),
+    ("algorithm", "depth_floor", 0.15),
+    ("algorithm", "min_segment_nonspace_chars", 32),
+    ("embedding", "model_id", "Qwen/Qwen3-Embedding-0.6B"),
+    ("embedding", "revision", "a" * 40),
+    ("embedding", "dtype", "float32"),
+    ("embedding", "batch_size", 2),
+])
+def test_research_cli_rejects_changed_frozen_parameters_before_source_access(
+    tmp_path, monkeypatch, capsys, section, field, value,
+):
+    """同一正式类不等于冻结组合；合法但未经采纳的参数也须在读取来源前拒绝。"""
+    root = Path(semantic_runtime.__file__).resolve().parents[3]
+    spec = importlib.util.spec_from_file_location("frozen_settings_cli_test", root / "scripts/text_segment_research.py")
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+    accessed = []
+    def forbidden(*args, **kwargs):
+        """留证并阻止任何来源或运行访问，拒绝不能仅依靠后续失败。"""
+        accessed.append(True)
+        raise AssertionError("unfrozen settings reached source or runtime")
+    monkeypatch.setattr(cli, "load_research_input", forbidden)
+    monkeypatch.setattr(semantic_runtime, "run_guarded_semantic_batch", forbidden)
+    raw = json.loads((root / "configs/text-segmentation-semantic-8b-coherent.json").read_text())
+    raw[section][field] = value
+    config = tmp_path / "changed-config.json"
+    config.write_text(json.dumps(raw))
+    monkeypatch.setattr(sys, "argv", ["text_segment_research.py", "--output", str(tmp_path / "output"),
+                                     "--algorithm-config", str(config), "--code-version", "synthetic"])
+    assert cli.main() == 1
+    assert "ValueError" in capsys.readouterr().err and not accessed
+    assert not (tmp_path / "output").exists()
+
+
+def test_current_frozen_settings_validator_binds_registered_digest():
+    """登记摘要独立保存；合法配置原样接受，不依赖外部文件重新定义基准。"""
+    from tourism_ugc_study.segmentation.semantic_config import (
+        CURRENT_FROZEN_SETTINGS_SHA256, load_semantic_settings, validate_current_frozen_settings,
+    )
+    root = Path(semantic_runtime.__file__).resolve().parents[3]
+    current = load_semantic_settings(root / "configs/text-segmentation-semantic-8b-coherent.json")
+    assert current.fingerprint == CURRENT_FROZEN_SETTINGS_SHA256
+    assert validate_current_frozen_settings(current) is None
 
 
 def test_snapshot_drift_before_final_validation_prevents_publication(tmp_path):

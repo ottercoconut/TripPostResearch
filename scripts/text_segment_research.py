@@ -13,7 +13,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if __package__ in {None, ""}:
     sys.path.insert(0, str(ROOT / "src"))
 
-from tourism_ugc_study.segmentation.batch import run_research_segmentation
 from tourism_ugc_study.segmentation.config import load_research_input
 
 
@@ -23,7 +22,8 @@ def main() -> int:
     parser.add_argument("--config", type=Path, help="配对来源配置；省略沿用仓库研究语料配置")
     parser.add_argument("--frozen-input", type=Path, help="离线开发input-manifest；与显式--config/--members互斥")
     parser.add_argument("--output", type=Path, required=True, help="新的本地运行目录，建议放在results下")
-    parser.add_argument("--algorithm-config", type=Path, help="显式启用语义切分；省略沿用旧客观规则")
+    parser.add_argument("--algorithm-config", type=Path, required=True,
+                        help="当前连贯块算法配置；必须显式指定，不再回退到旧切分规则")
     parser.add_argument("--cache-dir", type=Path, help="私有向量缓存；默认输出旁.semantic-vector-cache")
     parser.add_argument("--members", type=Path, help="开发样本manifest；提供后不可作为全量发布包导入")
     parser.add_argument("--load-timeout", type=float, default=300, help="语义模型加载预算秒数，默认300")
@@ -34,11 +34,18 @@ def main() -> int:
     args = parser.parse_args()
     if args.frozen_input and (args.config is not None or args.members is not None):
         parser.error("--frozen-input与显式--config/--members互斥")
-    if args.frozen_input and not args.algorithm_config:
-        parser.error("--frozen-input需要--algorithm-config")
     if args.code_version is not None and not args.code_version.strip():
         parser.error("--code-version必须是非空来源描述")
     try:
+        from tourism_ugc_study.segmentation.semantic_config import (
+            CoherentSemanticConfig, load_semantic_settings, validate_current_frozen_settings,
+        )
+        settings = load_semantic_settings(args.algorithm_config)
+        # 历史配置仍可由核验／重放工具读取；新批次不能误用已退役生成规则。
+        # 在读取正文或加载模型前拒绝，避免错误配置产生新的旧算法结果。
+        if type(settings.algorithm) is not CoherentSemanticConfig:
+            raise ValueError("retired_algorithm_for_new_run")
+        validate_current_frozen_settings(settings)
         if args.code_version is not None:
             # 仅显式声明才允许无.git输入；该描述不是HEAD证明，实际字节由监督器留存。
             version = args.code_version
@@ -52,23 +59,17 @@ def main() -> int:
         else:
             source = load_research_input(args.config or ROOT / "configs/text-segmentation-research.json")
         progress = lambda done, total: print(f"已切分 {done}/{total}", file=sys.stderr, flush=True)
-        if args.algorithm_config:
-            from tourism_ugc_study.segmentation.semantic_runtime import run_guarded_semantic_batch, SemanticRuntimeLimits
-            from tourism_ugc_study.segmentation.semantic_config import load_semantic_settings
-            from tourism_ugc_study.segmentation.semantic_evaluation import load_development_members
-            from tourism_ugc_study.segmentation.semantic_resources import load_linux_resource_policy
-            members = load_development_members(args.members, source) if args.members else None
-            policy = load_linux_resource_policy(args.resource_policy) if args.resource_policy else None
-            result = run_guarded_semantic_batch(source, args.output, code_version=version,
-                settings=load_semantic_settings(args.algorithm_config), cache_dir=args.cache_dir,
-                post_ids=tuple(members["post_ids"]) if members else None,
-                seed=members["seed"] if members else None, members_path=args.members.resolve() if args.members else None,
-                limits=SemanticRuntimeLimits(load_seconds=args.load_timeout, post_seconds=args.post_timeout,
-                                             total_seconds=args.total_timeout), resource_policy=policy, progress=progress)
-        else:
-            if args.cache_dir or args.members or args.resource_policy:
-                parser.error("--cache-dir、--members和--resource-policy需要--algorithm-config")
-            result = run_research_segmentation(source, args.output, code_version=version, progress=progress)
+        from tourism_ugc_study.segmentation.semantic_runtime import run_guarded_semantic_batch, SemanticRuntimeLimits
+        from tourism_ugc_study.segmentation.semantic_evaluation import load_development_members
+        from tourism_ugc_study.segmentation.semantic_resources import load_linux_resource_policy
+        members = load_development_members(args.members, source) if args.members else None
+        policy = load_linux_resource_policy(args.resource_policy) if args.resource_policy else None
+        result = run_guarded_semantic_batch(source, args.output, code_version=version,
+            settings=settings, cache_dir=args.cache_dir,
+            post_ids=tuple(members["post_ids"]) if members else None,
+            seed=members["seed"] if members else None, members_path=args.members.resolve() if args.members else None,
+            limits=SemanticRuntimeLimits(load_seconds=args.load_timeout, post_seconds=args.post_timeout,
+                                         total_seconds=args.total_timeout), resource_policy=policy, progress=progress)
     except KeyboardInterrupt:
         print("切分运行中断：KeyboardInterrupt", file=sys.stderr)
         return 130
