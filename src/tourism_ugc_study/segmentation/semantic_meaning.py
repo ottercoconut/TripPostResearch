@@ -19,13 +19,14 @@ import unicodedata
 from .contracts import SemanticDecision, TextSegment, TextUnit
 from .integrity import WHITE, validate
 from .semantic_config import SemanticConfig
+from .semantic_coherence import discover_coherent_blocks
 from .semantic_partition import TokenCounter
 from .semantic_structure import (
     StructureBlock, analyze_gap_structure, discover_context_blocks,
     discover_structure_blocks,
 )
 
-EXPERIMENT_ID = "experimental-meaning-units-3"
+EXPERIMENT_ID = "experimental-meaning-units-4"
 _LINES = re.compile(r"\r\n|[\r\n\u2028\u2029]")
 _DAY = re.compile(r"(?:day\s*\d+|d\s*\d+|第[0-9一二三四五六七八九十百]+天)(?![0-9])", re.I)
 _DATE = re.compile(r"(?:\d{2,4}年)?\d{1,2}月\d{1,2}日")
@@ -325,10 +326,12 @@ def _validate_input(text: str, units: Sequence[TextUnit], decision: SemanticDeci
 
 def _length_partition(text: str, units: Sequence[TextUnit], decision: SemanticDecision,
                       config: SemanticConfig, counter: TokenCounter, cuts: Sequence[int],
-                      penalties: Sequence[int], metadata_start: int | None) -> tuple[int, ...]:
+                      penalties: Sequence[tuple[int, int, int]], metadata_start: int | None) -> tuple[int, ...]:
     """对固定意思段执行全局硬长度分区，精确重计每一个可行原文区间。
 
-    排序目标依次为依赖破坏罚分、短段数、总段数、已有语义代价。BPE计数
+    排序目标依次为一般依赖破坏罚分、完整条目破坏数、连贯父块破坏数、
+    短段数、总段数、已有语义代价。三个依赖层级分别累计，不能用少切一次
+    父块抵消切开完整条目的损失，括号和句内续接又优先于条目完整性。BPE计数
     不必随前缀单调，因此首个超限不停止扫描。纯元数据末段不进入可行图；
     无路径时整帖抛错，既不截断也不通过超长输出回避硬上限。
     """
@@ -350,7 +353,7 @@ def _length_partition(text: str, units: Sequence[TextUnit], decision: SemanticDe
         if tokens(start, end) <= config.max_segment_tokens:
             start = end + 1
             continue
-        dp = {start: ((0, 0, 0, 0.0), ())}
+        dp = {start: ((0, 0, 0, 0, 0, 0.0), ())}
         for stop in range(start + 1, end + 2):
             candidates = []
             for first in range(start, stop):
@@ -362,8 +365,10 @@ def _length_partition(text: str, units: Sequence[TextUnit], decision: SemanticDe
                 internal, gap = stop <= end, stop - 1
                 short = prefix[units[stop - 1].end] - prefix[units[first].start] < config.min_segment_nonspace_chars
                 score = decision.gaps[gap].cohesion - decision.gaps[gap].depth if internal else 0.0
-                cost = (previous[0] + (penalties[gap] if internal else 0), previous[1] + int(short),
-                        previous[2] + 1, previous[3] + score)
+                damage = penalties[gap] if internal else (0, 0, 0)
+                cost = (previous[0] + damage[0], previous[1] + damage[1],
+                        previous[2] + damage[2], previous[3] + int(short),
+                        previous[4] + 1, previous[5] + score)
                 candidates.append((cost, (*path, gap) if internal else path))
             if candidates:
                 dp[stop] = min(candidates)
@@ -378,6 +383,7 @@ def partition_by_meaning(text: str, units: Sequence[TextUnit], decision: Semanti
                          config: SemanticConfig, counter: TokenCounter) -> MeaningPartition:
     """以已评分 gap 构造实验意思片段，返回无损原文与逐 gap 选择理由。
 
+    连贯父块优先保留完整介绍／推荐，子条目可独立编码不代表必须拆开。
     结构边界先选，局部语义边界随后按既有深度排序检查最小段长；除了上游
     已选点，所有自然 gap 在 cohesion 不高于配置绝对阈值时也获得提名，
     不要求它恰好成为局部谷值。阈值仍是开发参数，不代表语义质量保证。明确题头
@@ -388,12 +394,20 @@ def partition_by_meaning(text: str, units: Sequence[TextUnit], decision: Semanti
     """
     _validate_input(text, units, decision, config, counter)
     features = analyze_gap_structure(text, units)
-    blocks = _meaning_blocks(text, units)
+    coherent = discover_coherent_blocks(text, units)
+    # 父块阻止组内结构与语义提名；完整子条目只增加硬长度退让时的代价，
+    # 使可行的条目间切点优先于条目内部。超长单项仍可退让且保留trace。
+    items = tuple(StructureBlock(start, end, "coherent_item",
+                  (("coherent_parent", block.start, block.end), (kind, start, end)))
+                  for block in coherent for kind, start, end in block.evidence
+                  if kind == "coherent_item")
+    blocks = tuple(sorted(set((*_meaning_blocks(text, units), *coherent, *items)),
+                          key=lambda block: (block.start, block.end, block.kind)))
     starts = {unit.start: index - 1 for index, unit in enumerate(units) if index}
     structural: dict[int, list[StructureBlock]] = {}
     unavailable: list[tuple[str, int, int]] = []
     for block in blocks:
-        if block.kind in {"trailing_metadata_context", "syntactic_continuation"} or block.start == (units[0].start if units else 0):
+        if block.kind in {"trailing_metadata_context", "syntactic_continuation", "coherent_item"} or block.start == (units[0].start if units else 0):
             continue
         gap = starts.get(block.start)
         if gap is None:
@@ -403,7 +417,7 @@ def partition_by_meaning(text: str, units: Sequence[TextUnit], decision: Semanti
     metadata = [span[1] for block in blocks if block.kind == "trailing_metadata_context"
                 for span in block.evidence if span[0] == "trailing_metadata"]
     metadata_start = min(metadata) if metadata else None
-    penalties, blocked, reasons, evidence, sources = [], [], [], [], []
+    length_penalties, blocked, reasons, evidence, sources = [], [], [], [], []
     original = set(decision.semantic_boundaries)
     absolute = {index for index, feature in enumerate(features)
                 if feature.natural_boundary and decision.gaps[index].cohesion <= config.absolute_cohesion_threshold}
@@ -426,7 +440,11 @@ def partition_by_meaning(text: str, units: Sequence[TextUnit], decision: Semanti
         if continuation:
             local.append("punctuation_continuation")
             penalty += 8
-        penalties.append(penalty)
+        coherent_items = sum(block.kind == "coherent_item" for block in active)
+        coherent_parents = sum(block.kind in {"coherent_enumeration", "coherent_schedule",
+                                              "coherent_directory"} for block in active)
+        dependency = penalty - 12 * (coherent_items + coherent_parents)
+        length_penalties.append((dependency, coherent_items, coherent_parents))
         blocked.append(penalty > 0)
         reasons.append(local)
         evidence.append([("left_scored_unit", units[index].start, units[index].end),
@@ -466,7 +484,7 @@ def partition_by_meaning(text: str, units: Sequence[TextUnit], decision: Semanti
             semantic.append(index)
             reasons[index].append("selected_local_semantic")
     structural_selected = tuple(index for index in cuts if index in structural)
-    lengths = _length_partition(text, units, decision, config, counter, cuts, penalties, metadata_start)
+    lengths = _length_partition(text, units, decision, config, counter, cuts, length_penalties, metadata_start)
     selected = set((*cuts, *lengths))
     segments, first = [], 0
     for last in (*sorted(selected), len(units) - 1) if units else ():

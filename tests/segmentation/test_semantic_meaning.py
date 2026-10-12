@@ -130,7 +130,7 @@ def test_sentence_final_day_title_binds_following_route_without_new_gap():
 
 
 def test_shop_name_directory_lead_and_explanation_do_not_split_apart():
-    """目录引导、店名与首解释相依，完整陈述本身不能升级标题链。"""
+    """连续推荐的目录与多家店铺说明整体保留，不把上一交通陈述并入。"""
     parts = ["✅这里没有公共单车❌", "🙋这次喜欢的几家小店↓", "林间茶屋🍵",
              "茶屋院子里种着几株大树，树下放有桌椅，我们坐在那里喝茶聊天。",
              "河畔面馆🥣", "这家面馆的面条现点现煮，店主还准备了几种可以自行选择的小菜。"]
@@ -138,7 +138,7 @@ def test_shop_name_directory_lead_and_explanation_do_not_split_apart():
     assert all(s.raw_text not in parts[1:3] + [parts[4]] for s in result.segments)
     assert any(s.raw_text.startswith(parts[1] + "\n" + parts[2]) for s in result.segments)
     assert not any(block.start == 0 for block in result.protected_blocks)
-    assert any(s.raw_text == "\n".join(parts[4:]) for s in result.segments)
+    assert [s.raw_text for s in result.segments] == [parts[0], "\n".join(parts[1:])]
     assert_integrity(text, result)
 
 
@@ -323,3 +323,75 @@ def test_substantive_tail_mentioning_metadata_remains_independent(body):
     assert [s.raw_text for s in result.segments] == parts
     assert not any(block.kind == "trailing_metadata_context" for block in result.protected_blocks)
     assert_integrity(text, result)
+
+
+def test_component_introduction_keeps_its_numbered_parts_before_experience_section():
+    """同一地点简介与组成清单保持整体，语义低分不能逐项拆开父介绍块。"""
+    parts = ["云岸展馆是一座沿河建设的公共展览空间。", "云岸展馆主要分为三个部分：",
+             "1、入口广场：这里可以休息，也能欣赏河边的树木。",
+             "2、历史展厅：这里介绍城镇的发展过程，可以了解当地历史。",
+             "3、河边平台：平台设有长椅，适合休息和观察来往的小船。",
+             "【实际游览体验】：", "我们中午来到展馆，发现入口广场没有遮阴，排队时十分闷热。"]
+    text, units, decision = fixture(parts, selected=tuple(range(len(parts) - 1)), cohesion=0.2)
+    result = partition_by_meaning(text, units, decision,
+                                 SemanticConfig(min_segment_nonspace_chars=1, max_segment_tokens=512),
+                                 CharacterCounter())
+    assert [s.raw_text for s in result.segments] == ["\n".join(parts[:5]), "\n".join(parts[5:])]
+    assert any("inside_coherent_enumeration" in trace.reason_codes for trace in result.gap_decisions)
+    assert_integrity(text, result)
+
+
+def test_same_day_recommendations_stay_together_but_next_day_can_start_a_segment():
+    """日程中的连续推荐不逐景点拆，下一日程仍是可定位的父层边界。"""
+    parts = ["📅Day1 河岸慢游", "展馆→书屋→河湾", "✅展馆", "展厅里的陈列很丰富。",
+             "✅书屋", "靠窗的座位安静，可以在这里读书和休息。",
+             "📅Day2 山间步道", "我们坐车来到山脚，沿着步道前行，在平台停留之后原路返回。"]
+    text, units, decision = fixture(parts, selected=tuple(range(len(parts) - 1)), cohesion=0.2)
+    result = partition_by_meaning(text, units, decision,
+                                 SemanticConfig(min_segment_nonspace_chars=1, max_segment_tokens=512),
+                                 CharacterCounter())
+    assert [s.raw_text for s in result.segments] == ["\n".join(parts[:6]), "\n".join(parts[6:])]
+    assert any("inside_coherent_schedule" in trace.reason_codes for trace in result.gap_decisions)
+    assert_integrity(text, result)
+
+
+def test_oversized_coherent_group_uses_whole_items_when_they_fit_the_hard_limit():
+    """完整块超硬上限时可退让，但有完整条目方案时不切开条目说明。"""
+    parts = ["本次路线主要包括三个部分：",
+             "1、河边展馆：沿河慢慢散步可以来到展馆，屋里陈列了当地的历史资料。",
+             "2、山间平台：沿着石阶可以来到平台，在这里能够观察河流和周围的树林。",
+             "3、镇中书屋：屋里有供游客阅读和休息的座位，窗外是一条安静的街道。"]
+    text, units, decision = fixture(parts, selected=(0, 1, 2), cohesion=0.2)
+    config = SemanticConfig(unit_max_tokens=64, max_segment_tokens=75, min_segment_nonspace_chars=1)
+    result = partition_by_meaning(text, units, decision, config, CharacterCounter())
+    assert len(result.segments) > 1
+    items = [block for block in result.protected_blocks if block.kind == "coherent_item"]
+    assert len(items) == 3
+    assert all(not (item.start < segment.end < item.end)
+               for segment in result.segments[:-1] for item in items)
+    assert result.length_boundaries and result.forced_structure_boundaries
+    assert_integrity(text, result, 75)
+
+
+def test_hard_limit_prefers_two_between_item_cuts_to_one_inside_item_cut():
+    """不能用少切一次父块抵消完整条目被切断；各项含多个已有计算单元。"""
+    lines = ["游园路线分为三个部分："] + [
+        f"{n}、展区：" + "甲" * 26 + "。" + "乙" * 26 + "。" for n in range(1, 4)]
+    text = "\n".join(lines)
+    units = [TextUnit(0, len(lines[0]), len(lines[0]))]
+    cursor = len(lines[0]) + 1
+    for line in lines[1:]:
+        middle = line.index("。") + 1
+        units.extend((TextUnit(cursor, cursor + middle, middle),
+                      TextUnit(cursor + middle, cursor + len(line), len(line) - middle)))
+        cursor += len(line) + 1
+    decision = SemanticDecision("scored_keep", (), tuple(
+        GapScore(i, .95, 0.0, False, False, "synthetic") for i in range(len(units) - 1)), (), ())
+    config = SemanticConfig(unit_max_tokens=64, max_segment_tokens=105,
+                            min_segment_nonspace_chars=1)
+    result = partition_by_meaning(text, units, decision, config, CharacterCounter())
+    assert [s.raw_text for s in result.segments] == ["\n".join(lines[:2]), *lines[2:]]
+    assert result.length_boundaries == (2, 4)
+    assert all("inside_coherent_item" not in result.gap_decisions[i].reason_codes
+               for i in result.length_boundaries)
+    assert_integrity(text, result, 105)
