@@ -86,24 +86,21 @@ def test_relative_depth_can_select_a_valley_above_absolute_threshold():
     assert decision.gaps[1].reason == "semantic_depth"
 
 
-def test_short_fragments_are_suppressed_without_removing_punctuation():
-    """两个很短单元可以评分，但最小长度保护会保留整帖与全部标点。"""
+def test_short_fragments_can_be_split_and_keep_all_punctuation():
+    """不设最短段门槛：两个很短单元语义差异明显时切开，标点随原单元保留。"""
     text, units = make_units(["好看！", "方便！"])
     segments, decision = choose_boundaries(text, units, [[1, 0], [0, 1]], CoherentSemanticConfig(), CharacterCounter())
-    assert len(segments) == 1 and segments[0].raw_text == text
-    assert decision.status == "scored_keep"
-    assert decision.gaps[0].reason == "min_segment_nonspace_chars"
-    assert "min_segment_nonspace_chars" in decision.reason_codes
+    assert [segment.raw_text for segment in segments] == ["好看！", "方便！"]
+    assert decision.status == "scored_split" and decision.gaps[0].selected
 
 
-def test_shortness_is_checked_against_already_accepted_neighbours():
-    """两个强候选间只有6字时只接受一个，避免后续边界把现有段切碎。"""
+def test_short_middle_segment_is_not_suppressed_between_accepted_neighbours():
+    """两个强候选间只有6字时两处都接受；短段本身不构成碎切。"""
     text, units = make_units(["甲" * 12, "乙" * 3, "丙" * 3, "丁" * 12])
-    config = replace(CoherentSemanticConfig(), window_tokens=1, min_segment_nonspace_chars=12)
+    config = replace(CoherentSemanticConfig(), window_tokens=1)
     segments, decision = choose_boundaries(text, units, [[1, 0], [0, 1], [0, 1], [1, 0]], config, CharacterCounter())
-    assert decision.semantic_boundaries == (0,)
-    assert decision.gaps[2].reason == "min_segment_nonspace_chars"
-    assert [len(segment.raw_text) for segment in segments] == [12, 18]
+    assert decision.semantic_boundaries == (0, 2)
+    assert [len(segment.raw_text) for segment in segments] == [12, 6, 12]
 
 
 @pytest.mark.parametrize("curve,expected", [
@@ -164,14 +161,14 @@ def test_exact_span_count_does_not_assume_additivity_or_monotonic_prefix_counts(
     assert [NonMonotonicCounter().count(segment.raw_text) for segment in segments] == [6, 2]
 
 
-def test_length_limit_can_allow_a_short_tail_and_records_it():
-    """无法同时满足最小段长时优先硬上限，结果仍无损且明确记录短尾。"""
+def test_initial_length_cut_allows_a_short_tail_without_special_marking():
+    """初始临时长度切点可留下短尾；短段不再单独记录原因码。"""
     text, units = make_units(["甲" * 12, "乙" * 3, "丙" * 3])
     config = replace(CoherentSemanticConfig(), unit_max_tokens=12, max_segment_tokens=12)
     segments, decision = choose_boundaries(text, units, np.ones((3, 2)), config, CharacterCounter())
     assert decision.length_boundaries == (0,)
     assert [len(segment.raw_text) for segment in segments] == [12, 6]
-    assert "short_segment_due_to_limit" in decision.reason_codes
+    assert decision.reason_codes == ("no_semantic_boundary", "max_segment_tokens")
 
 
 def test_single_unit_over_hard_limit_fails_without_truncating():
@@ -213,7 +210,7 @@ def test_repeat_text_emoji_spaces_and_feff_preserve_offsets():
     parts = ["👨‍👩‍👧‍👦出游真开心真开心。", "👨‍👩‍👧‍👦出游真开心真开心。", "\ufeff换乘公交前往不同地点。"]
     text, units = make_units(parts, separator="\r\n \t")
     vectors = [[1, 0], [1, 0], [0, 1]]
-    segments, decision = choose_boundaries(text, units, vectors, CoherentSemanticConfig(window_tokens=64, min_segment_nonspace_chars=12), CharacterCounter())
+    segments, decision = choose_boundaries(text, units, vectors, CoherentSemanticConfig(window_tokens=64), CharacterCounter())
     validate(text, [asdict(segment) for segment in segments])
     assert "\r\n \t" in segments[0].raw_text
     assert segments[-1].raw_text.startswith("\ufeff")

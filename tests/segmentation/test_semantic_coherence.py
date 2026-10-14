@@ -117,8 +117,8 @@ def test_multiday_route_overview_and_wrapped_routes_share_one_parent():
     assert len([span for span in blocks[0].evidence if span[0] == "parent_route"]) == 3
 
 
-def test_multiday_route_overview_rejects_all_optional_semantic_cuts():
-    """整份目录的保护不能依赖某组旧分数恰巧不提名日序之间的gap。"""
+def test_multiday_route_overview_is_gray_zone_not_forced_day_cuts():
+    """路线目录只作证据：模型强烈提名时可切，但D1/D2箭头行不触发换天必切。"""
     from tourism_ugc_study.segmentation.contracts import GapScore, SemanticDecision
     from tourism_ugc_study.segmentation.semantic_config import CoherentSemanticConfig
     from tourism_ugc_study.segmentation.semantic_meaning import partition_by_meaning
@@ -138,10 +138,11 @@ def test_multiday_route_overview_rejects_all_optional_semantic_cuts():
     selected = tuple(range(len(units) - 1))
     gaps = tuple(GapScore(i, 0.1, 0.5, True, True, "synthetic_selected") for i in selected)
     decision = SemanticDecision("scored_split", (), gaps, selected, ())
-    config = CoherentSemanticConfig(min_segment_nonspace_chars=1, max_segment_tokens=512)
+    config = CoherentSemanticConfig(max_segment_tokens=512, edge_segment_nonspace_chars=1)
     result = partition_by_meaning(text, units, decision, config, Counter())
-    assert len(result.segments) == 1 and result.segments[0].raw_text == text
-    assert result.semantic_boundaries == result.structural_boundaries == ()
+    assert [segment.raw_text for segment in result.segments] == ["\n".join(parts[:2]), parts[2], parts[3], parts[4]]
+    assert not any("selected_day_transition" in trace.reason_codes for trace in result.gap_decisions)
+    assert any("inside_coherent_directory" in trace.reason_codes for trace in result.gap_decisions)
 
 
 def test_day_route_and_subitems_form_one_scope_and_end_before_next_day():

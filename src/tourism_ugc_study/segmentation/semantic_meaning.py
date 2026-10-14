@@ -1,15 +1,17 @@
-"""冻结连贯块分区核心，在既有单元及评分上选择完整介绍／推荐边界。
+"""分层意思分区核心：规则决定禁止切与必须切，语义模型只在灰色地带选择。
 
 本模块仅做纯计算；不访问文件、数据库、帖子身份、模型或向量缓存，不新增
 单元或伪造 embedding。调用者先用原有评分函数生成 SemanticDecision；窗口
-和阈值由调用者明确保存。结构题头可以主动提出边界，但句号、属性变化本身
-不会触发切分。规则经用户采纳；运行结果仍须抽查，不能自动证明所有片段均可独立编码。
-无法在既有 gap 上表达的意思转换保留为限制，不能移动到句内相邻位置代替。
+和阈值由调用者明确保存。优先级为：禁止切＞换天必切＞长度兜底＞灰色地带。
+句号、属性变化本身不会触发切分；小标题只在语义曲线有下降时切开。最后一步
+只合并碎段：无文字的片段和过短的首末段并入相邻段。运行结果仍须抽查，不能
+自动证明所有片段均符合人的切分直觉。无法在既有 gap 上表达的意思转换保留
+为限制，不能移动到句内相邻位置代替。
 """
 
 from __future__ import annotations
 
-from bisect import bisect_left, insort
+from bisect import insort
 from dataclasses import asdict, dataclass
 from math import isfinite
 import re
@@ -20,12 +22,13 @@ from .contracts import SemanticDecision, TextSegment, TextUnit, TokenCounter
 from .integrity import WHITE, validate
 from .semantic_config import CoherentSemanticConfig
 from .semantic_coherence import discover_coherent_blocks
+from .semantic_relations import analyze_gap_relations
 from .semantic_structure import (
     StructureBlock, analyze_gap_structure, discover_context_blocks,
     discover_structure_blocks,
 )
 
-EXPERIMENT_ID = "experimental-meaning-units-4"
+EXPERIMENT_ID = "meaning-layers-1"
 _LINES = re.compile(r"\r\n|[\r\n\u2028\u2029]")
 _DAY = re.compile(r"(?:day\s*\d+|d\s*\d+|第[0-9一二三四五六七八九十百]+天)(?![0-9])", re.I)
 _DATE = re.compile(r"(?:\d{2,4}年)?\d{1,2}月\d{1,2}日")
@@ -41,7 +44,7 @@ class MeaningGapDecision:
     """一个已有 gap 的最终选择及原文证据；index 是零基单元间索引。
 
     sources 记录被提名的来源，不等同被选中；reason_codes 同时解释过滤、
-    最小长度及硬长度覆盖。evidence_spans 使用原文码点左闭右开坐标，
+    碎段合并及长度兜底。evidence_spans 使用原文码点左闭右开坐标，
     包含评分所对应的左右单元，避免仅给不可核验的抽象原因。
     """
 
@@ -54,11 +57,14 @@ class MeaningGapDecision:
 
 @dataclass(frozen=True)
 class MeaningPartition:
-    """完整实验结果；边界元组均为 gap 索引，保护块则为原文码点。
+    """完整分区结果；边界元组均为 gap 索引，结构块则为原文码点。
 
+    protected_blocks 同时含禁止切依据（题头附着、尾标签、句法续接）和只作
+    证据的连贯块（coherent_*），后者不阻止切分。
     结构与语义来源可在同一个切点重叠，length_boundaries 只记录额外长度切点。
-    forced_structure_boundaries 明示硬上限导致的依赖破坏；不会默默弱化规则。
-    所有字段不可变，dataclasses.asdict 可用于调用方的实验记录。
+    length_exceptions 是超过长度触发线却无法在允许位置补切的片段编号（从1
+    开始）；这些片段保留原文，等待人工查看。所有字段不可变，
+    dataclasses.asdict 可用于调用方的实验记录。
     """
 
     segments: tuple[TextSegment, ...]
@@ -66,7 +72,7 @@ class MeaningPartition:
     structural_boundaries: tuple[int, ...]
     length_boundaries: tuple[int, ...]
     suppressed_semantic_boundaries: tuple[int, ...]
-    forced_structure_boundaries: tuple[int, ...]
+    length_exceptions: tuple[int, ...]
     gap_decisions: tuple[MeaningGapDecision, ...]
     protected_blocks: tuple[StructureBlock, ...]
     unavailable_structural_spans: tuple[tuple[str, int, int], ...]
@@ -323,21 +329,55 @@ def _validate_input(text: str, units: Sequence[TextUnit], decision: SemanticDeci
             raise ValueError("meaning_boundary_identity_mismatch")
 
 
+def _day_heading(text: str, start: int) -> bool:
+    """判断结构提名起点所在行是否为叙述换天题头（Day2、第二天、日期等）。
+
+    只认 _heading 判定的日程题头；带箭头的路线目录行不算换天，交由
+    灰色地带处理，避免把多日目录逐行拆开。
+    """
+    match = _LINES.search(text, start)
+    heading = _heading(text[start:match.start() if match else len(text)])
+    return heading is not None and heading.kind in {"schedule_heading", "trailing_schedule_heading"}
+
+
+def _label_heading_line(text: str, end: int) -> bool:
+    """判断以 end 结束的整行是否为明确的纯标签小标题，其后正文不能被切走。
+
+    只认 _heading 判定的显式题头、日程题头或行尾带装饰的短题头（如“交通🅿️”“▪️游玩路线”
+    “🌷Day2 金沙滩对比实测”）；“晚上：河湾灯景”这类“标签：内容”行本身就是
+    内容，不受此限制，后面遇到换天仍可切开。无标记短行不在此列，避免把
+    普通短句误当题头而少切。
+    """
+    starts = [match.end() for match in _LINES.finditer(text, 0, end)]
+    line = text[starts[-1] if starts else 0:end]
+    heading = _heading(line)
+    if heading is None:
+        return False
+    # “交通🅿️”“美食🍽️”以行尾装饰标示题头，与行首装饰同等视为明确标签。
+    core = line.rstrip()
+    while core and (core[-1] in WHITE or core[-1] == "\ufe0f" or unicodedata.category(core[-1])[0] in {"S", "M"}):
+        core = core[:-1]
+    decorated = bool(core) and core != line.rstrip()
+    if not (heading.explicit or heading.kind == "trailing_schedule_heading" or decorated):
+        return False
+    return not re.search(r"[:：]\s*\S", _plain(line))
+
+
 def _length_partition(text: str, units: Sequence[TextUnit], decision: SemanticDecision,
                       config: CoherentSemanticConfig, counter: TokenCounter, cuts: Sequence[int],
-                      penalties: Sequence[tuple[int, int, int]], metadata_start: int | None) -> tuple[int, ...]:
-    """对固定意思段执行全局硬长度分区，精确重计每一个可行原文区间。
+                      ranks: Sequence[int | None],
+                      ) -> tuple[tuple[int, ...], tuple[tuple[int, int], ...]]:
+    """长度兜底：只对超过 max_segment_tokens 的意思段补切，返回补切点与超长单元区间。
 
-    排序目标依次为一般依赖破坏罚分、完整条目破坏数、连贯父块破坏数、
-    短段数、总段数、已有语义代价。三个依赖层级分别累计，不能用少切一次
-    父块抵消切开完整条目的损失，括号和句内续接又优先于条目完整性。BPE计数
-    不必随前缀单调，因此首个超限不停止扫描。纯元数据末段不进入可行图；
-    无路径时整帖抛错，既不截断也不通过超长输出回避硬上限。
+    ranks 给出每个 gap 作为长度切点的等级：2 换行、1 句末、0 无标点长文中
+    以空白分隔的位置，None 表示被禁止切规则否决。先在上限之内的允许位置
+    中挑等级最高者，同级取语义变化（depth）最大、再取连贯度更低、更靠后
+    者——人被迫分段时也先找段落边界。上限内没有允许位置时，才向
+    后取第一个允许位置，并把这一段记为超长异常；直到段尾都没有允许位置
+    时，整段保留并记为异常。长度从不推翻禁止切规则，也不截断原文。BPE
+    计数不必随前缀单调，因此逐一精确计数而不二分。
     """
     counts: dict[tuple[int, int], int] = {}
-    prefix = [0]
-    for char in text:
-        prefix.append(prefix[-1] + (char not in WHITE))
 
     def tokens(first: int, last: int) -> int:
         """调用内缓存完整 span 的真实计数，缓存不跨正文或调用复用。"""
@@ -347,104 +387,170 @@ def _length_partition(text: str, units: Sequence[TextUnit], decision: SemanticDe
         return counts[key]
 
     output: list[int] = []
+    exceptions: list[tuple[int, int]] = []
     start = 0
     for end in (*cuts, len(units) - 1) if units else ():
-        if tokens(start, end) <= config.max_segment_tokens:
-            start = end + 1
-            continue
-        dp = {start: ((0, 0, 0, 0, 0, 0.0), ())}
-        for stop in range(start + 1, end + 2):
-            candidates = []
-            for first in range(start, stop):
-                if first not in dp or tokens(first, stop - 1) > config.max_segment_tokens:
-                    continue
-                if metadata_start is not None and units[first].start >= metadata_start:
-                    continue
-                previous, path = dp[first]
-                internal, gap = stop <= end, stop - 1
-                short = prefix[units[stop - 1].end] - prefix[units[first].start] < config.min_segment_nonspace_chars
-                score = decision.gaps[gap].cohesion - decision.gaps[gap].depth if internal else 0.0
-                damage = penalties[gap] if internal else (0, 0, 0)
-                cost = (previous[0] + damage[0], previous[1] + damage[1],
-                        previous[2] + damage[2], previous[3] + int(short),
-                        previous[4] + 1, previous[5] + score)
-                candidates.append((cost, (*path, gap) if internal else path))
-            if candidates:
-                dp[stop] = min(candidates)
-        if end + 1 not in dp:
-            raise ValueError("unsplittable_meaning_segment_limit")
-        output.extend(dp[end + 1][1])
+        while tokens(start, end) > config.max_segment_tokens:
+            allowed = [gap for gap in range(start, end) if ranks[gap] is not None]
+            within = [gap for gap in allowed if tokens(start, gap) <= config.max_segment_tokens]
+            if within:
+                gap = max(within, key=lambda i: (ranks[i], decision.gaps[i].depth, -decision.gaps[i].cohesion, i))
+            elif allowed:
+                gap = allowed[0]
+                exceptions.append((start, gap))
+            else:
+                exceptions.append((start, end))
+                break
+            output.append(gap)
+            start = gap + 1
         start = end + 1
-    return tuple(output)
+    return tuple(output), tuple(exceptions)
+
+
+# 韩文填充符属字母类却不显示任何内容，排版时常被当作空行占位。
+_FILLERS = frozenset("ᅟᅠㅤﾠ")
+
+
+def _wordless(value: str) -> bool:
+    """片段没有任何文字或数字，只有 emoji、符号、零宽字符或占位符。"""
+    return not any(char.isalnum() and char not in _FILLERS for char in value)
+
+
+def _merge_fragments(text: str, units: Sequence[TextUnit], cuts: Sequence[int], locked: set[int],
+                     config: CoherentSemanticConfig, counter: TokenCounter,
+                     ) -> tuple[tuple[int, ...], dict[int, str]]:
+    """撤销会留下不像人切的碎段的切点，返回保留切点与“撤销切点→原因”。
+
+    两条规则，按顺序执行：没有任何文字的片段（单个 emoji、箭头、分隔线、
+    零宽字符）并入前段，位于开头时并入后段；首段、末段非空白字符不足
+    edge_segment_nonspace_chars 时分别并入后段、前段。正文中间的短段不处理，
+    因为小标题和单句感受常是真正的意思单位。locked 中的换天切点从不撤销；
+    合并后超过 max_segment_tokens 的也不撤销，因此长度兜底切点与长度异常
+    片段保持不变。只删切点、不新增或移动切点。
+    """
+    kept = sorted(cuts)
+    merged: dict[int, str] = {}
+
+    def segment(position: int) -> str:
+        """第 position 个片段的原文；片段由相邻保留切点围成。"""
+        bounds = (-1, *kept, len(units) - 1)
+        return text[units[bounds[position] + 1].start:units[bounds[position + 1]].end]
+
+    def remove(position: int, reason: str) -> bool:
+        """尝试撤销 kept[position]，即合并其两侧片段；不允许时返回 False。"""
+        cut = kept[position]
+        if cut in locked:
+            return False
+        bounds = (-1, *kept, len(units) - 1)
+        first, last = bounds[position] + 1, bounds[position + 2]
+        if _checked_count(counter, text[units[first].start:units[last].end]) > config.max_segment_tokens:
+            return False
+        merged[cut] = reason
+        kept.pop(position)
+        return True
+
+    position = 0
+    while kept and position <= len(kept):
+        if _wordless(segment(position)):
+            # 并入前段后当前位置变为下一个片段；并入后段后当前片段已有文字。
+            if position and remove(position - 1, "merged_wordless_segment"):
+                continue
+            if position < len(kept) and remove(position, "merged_wordless_segment"):
+                continue
+        position += 1
+    limit = config.edge_segment_nonspace_chars
+    if kept and sum(char not in WHITE for char in segment(0)) < limit:
+        remove(0, "merged_short_first_segment")
+    if kept and sum(char not in WHITE for char in segment(len(kept))) < limit:
+        remove(len(kept) - 1, "merged_short_last_segment")
+    return tuple(kept), merged
+
+
+_COHERENT_KINDS = frozenset({"coherent_enumeration", "coherent_schedule", "coherent_directory", "coherent_item"})
 
 
 def partition_by_meaning(text: str, units: Sequence[TextUnit], decision: SemanticDecision,
                          config: CoherentSemanticConfig, counter: TokenCounter) -> MeaningPartition:
-    """以已评分 gap 构造实验意思片段，返回无损原文与逐 gap 选择理由。
+    """按“禁止切＞换天必切＞长度兜底＞灰色地带”的优先级选择最终切点。
 
-    连贯父块优先保留完整介绍／推荐，子条目可独立编码不代表必须拆开。
-    结构边界先选，局部语义边界随后按既有深度排序检查最小段长；除了上游
-    已选点，所有自然 gap 在 cohesion 不高于配置绝对阈值时也获得提名，
-    不要求它恰好成为局部谷值。阈值仍是开发参数，不代表语义质量保证。明确题头
-    及其完整说明允许短于软字符门槛，不因长度短就跨对象合并。句内逗号、
-    配对括号、题头首说明和尾标签附着抑制软切点；硬上限只在没有更好路径
-    时显式退让。结构跨度没有准确已有 gap 时记录 unavailable，不创造单元。
-    N=0/1仍检验原文和实际token；异常抛 ValueError，不返回半帖。
+    禁止切（一票否决，长度也不能推翻）：句内续接、同一行内的配对括号、题头与
+    首说明、纯标签小标题之后、尾部标签（含句末同行的标签），以及
+    semantic_relations 识别的强依赖词、未完结条件和括号说明。
+    句内位置不供语义或小标题选择；无标点长文中以空白分隔的位置只作为长度
+    兜底的最后手段。
+    换天必切：叙述中的日程题头只要未被禁止即切开。灰色地带：其余结构提名
+    （小标题、连贯块起点）只在该处语义曲线有下降（depth>epsilon）时切开；
+    语义谷值按深度门槛提名后直接采纳，不设全局最短段门槛。连贯块（完整介绍、
+    组成列表、同日推荐）只作证据保存，不再阻止切分。所有切点定下后，再由
+    _merge_fragments 撤销留下无文字碎段或过短首末段的切点（换天切点除外）。结构跨度没有准确已有
+    gap 时记录 unavailable，不创造单元。N=0/1仍检验原文和实际token；异常
+    抛 ValueError，不返回半帖。
     """
     _validate_input(text, units, decision, config, counter)
     features = analyze_gap_structure(text, units)
+    relations = analyze_gap_relations(text, units)
     coherent = discover_coherent_blocks(text, units)
-    # 父块阻止组内结构与语义提名；完整子条目只增加硬长度退让时的代价，
-    # 使可行的条目间切点优先于条目内部。超长单项仍可退让且保留trace。
-    items = tuple(StructureBlock(start, end, "coherent_item",
-                  (("coherent_parent", block.start, block.end), (kind, start, end)))
-                  for block in coherent for kind, start, end in block.evidence
-                  if kind == "coherent_item")
-    blocks = tuple(sorted(set((*_meaning_blocks(text, units), *coherent, *items)),
+    blocks = tuple(sorted(set((*_meaning_blocks(text, units), *coherent)),
                           key=lambda block: (block.start, block.end, block.kind)))
     starts = {unit.start: index - 1 for index, unit in enumerate(units) if index}
     structural: dict[int, list[StructureBlock]] = {}
     unavailable: list[tuple[str, int, int]] = []
     for block in blocks:
-        if block.kind in {"trailing_metadata_context", "syntactic_continuation", "coherent_item"} or block.start == (units[0].start if units else 0):
+        if block.kind in {"trailing_metadata_context", "syntactic_continuation"} or block.start == (units[0].start if units else 0):
             continue
         gap = starts.get(block.start)
         if gap is None:
             unavailable.append((block.kind, block.start, block.end))
         else:
             structural.setdefault(gap, []).append(block)
-    metadata = [span[1] for block in blocks if block.kind == "trailing_metadata_context"
-                for span in block.evidence if span[0] == "trailing_metadata"]
-    metadata_start = min(metadata) if metadata else None
-    length_penalties, blocked, reasons, evidence, sources = [], [], [], [], []
+    # 句末同行的尾部标签（如“……。 #话题#”）不成整行，行级尾标签识别看不到；
+    # 末尾连续的纯标签／账号／链接单元一律附着前文，与 A 层尾标签规则一致。
+    meta_tail = len(units)
+    while meta_tail > 1 and _metadata(text[units[meta_tail - 1].start:units[meta_tail - 1].end]):
+        meta_tail -= 1
+    blocked, ranks, reasons, evidence, sources = [], [], [], [], []
     original = set(decision.semantic_boundaries)
     absolute = {index for index, feature in enumerate(features)
                 if feature.natural_boundary and decision.gaps[index].cohesion <= config.absolute_cohesion_threshold}
     nominated = original | absolute
     for index, feature in enumerate(features):
         active = [block for block in blocks if block.start < units[index].end < block.end]
-        # 旧版 after_heading 来自单个模型单元，可能只是完整句被短切后的
-        # 假题头；本候选改用完整原文行与首说明块。属性字段仅留证据，不
-        # 一律否决交通/价格等独立说明，也不凭属性词主动选点。
+        # 连贯块只留作证据；真正否决切分的是题头附着、尾标签和句法续接。
+        protecting = [block for block in active if block.kind not in _COHERENT_KINDS]
         local = list(feature.reasons)
         local.extend(f"inside_{block.kind}" for block in active)
-        penalty = (8 if feature.boundary_kind == "internal" else 0)
-        penalty += 12 * int("inside_matched_bracket" in feature.reasons) + 12 * len(active)
+        local.extend(relations[index])
+        internal = feature.boundary_kind == "internal"
+        # 跨行配对的括号多半是引号错配，只保护同一行内的括号说明，避免一个
+        # 未闭合引号锁住数千字。
+        bracket = any(kind == "inside_matched_bracket" and not _LINES.search(text, start, end)
+                      for kind, start, end in feature.evidence_spans)
+        if "inside_matched_bracket" in feature.reasons and not bracket:
+            local.append("cross_line_bracket_ignored")
+        label = feature.boundary_kind == "line" and _label_heading_line(text, units[index].end)
+        if label:
+            local.append("after_label_heading")
+        tail = index + 1 >= meta_tail
+        if tail:
+            local.append("before_trailing_metadata")
+        veto = bracket or label or tail or bool(protecting) or bool(relations[index])
         # 换行不能将句内逗号/顿号/冒号变成独立意思；原文断行和模型断句
-        # 都服从同一续接门。硬长度仍可退让，但必须在最终trace显式标记。
+        # 都服从同一续接门，长度兜底同样不能越过。
         suffix = units[index].end
         while suffix > units[index].start and text[suffix - 1] in WHITE:
             suffix -= 1
         continuation = suffix > units[index].start and text[suffix - 1] in "，,、：:"
         if continuation:
             local.append("punctuation_continuation")
-            penalty += 8
-        coherent_items = sum(block.kind == "coherent_item" for block in active)
-        coherent_parents = sum(block.kind in {"coherent_enumeration", "coherent_schedule",
-                                              "coherent_directory"} for block in active)
-        dependency = penalty - 12 * (coherent_items + coherent_parents)
-        length_penalties.append((dependency, coherent_items, coherent_parents))
-        blocked.append(penalty > 0)
+            veto = True
+        # 无标点长文常以空白代替标点；这类句内位置不供语义或小标题选择，
+        # 只在长度兜底找不到换行和句末时作为最后的允许位置。逗号续接仍否决。
+        spaced = internal and any(c in WHITE for c in text[units[index].end:units[index + 1].start])
+        if spaced and not veto:
+            local.append("space_separated_fragment")
+        blocked.append(veto or internal)
+        ranks.append(None if veto or (internal and not spaced) else
+                     2 if feature.boundary_kind == "line" else 1 if feature.boundary_kind == "sentence" else 0)
         reasons.append(local)
         evidence.append([("left_scored_unit", units[index].start, units[index].end),
                          ("right_scored_unit", units[index + 1].start, units[index + 1].end),
@@ -459,54 +565,53 @@ def partition_by_meaning(text: str, units: Sequence[TextUnit], decision: Semanti
     for index in sorted(structural):
         if blocked[index]:
             reasons[index].append("rejected_structure_dependency")
-        else:
+        elif any(_day_heading(text, block.start) for block in structural[index]):
             cuts.append(index)
-            reasons[index].append("selected_explicit_structure")
+            reasons[index].append("selected_day_transition")
+        elif decision.gaps[index].depth > config.epsilon:
+            cuts.append(index)
+            reasons[index].append("selected_structure_with_semantic_dip")
+        else:
+            reasons[index].append("rejected_structure_without_semantic_dip")
     semantic: list[int] = []
-    for index in sorted(nominated, key=lambda i: (-decision.gaps[i].depth, decision.gaps[i].cohesion, i)):
+    for index in sorted(nominated):
         if blocked[index]:
             reasons[index].append("rejected_semantic_dependency")
             continue
-        if index in cuts:
-            semantic.append(index)
-            reasons[index].append("selected_local_semantic")
-            continue
-        position = bisect_left(cuts, index)
-        first = cuts[position - 1] + 1 if position else 0
-        last = cuts[position] if position < len(cuts) else len(units) - 1
-        sizes = [sum(c not in WHITE for c in text[a:b]) for a, b in
-                 ((units[first].start, units[index].end), (units[index + 1].start, units[last].end))]
-        if min(sizes) < config.min_segment_nonspace_chars:
-            reasons[index].append("rejected_min_segment_nonspace_chars")
-        else:
+        semantic.append(index)
+        reasons[index].append("selected_local_semantic")
+        if index not in cuts:
             insort(cuts, index)
-            semantic.append(index)
-            reasons[index].append("selected_local_semantic")
-    structural_selected = tuple(index for index in cuts if index in structural)
-    lengths = _length_partition(text, units, decision, config, counter, cuts, length_penalties, metadata_start)
-    selected = set((*cuts, *lengths))
+    lengths, exception_spans = _length_partition(text, units, decision, config, counter, cuts, ranks)
+    locked = {index for index in cuts if "selected_day_transition" in reasons[index]}
+    final, merged = _merge_fragments(text, units, (*cuts, *lengths), locked, config, counter)
+    for index, reason in merged.items():
+        reasons[index].append(reason)
+    selected = set(final)
+    semantic = [index for index in semantic if index in selected]
+    structural_selected = tuple(index for index in cuts if index in structural and index in selected)
+    lengths = tuple(index for index in lengths if index in selected)
     segments, first = [], 0
+    exception_ids: list[int] = []
     for last in (*sorted(selected), len(units) - 1) if units else ():
         start, end = units[first].start, units[last].end
         value = text[start:end]
-        if _checked_count(counter, value) > config.max_segment_tokens:
-            raise ValueError("meaning_length_invariant_failed")
         segments.append(TextSegment(len(segments) + 1, value, start, end))
-        if last in structural_selected and sum(c not in WHITE for c in value) < config.min_segment_nonspace_chars:
-            reasons[last].append("short_structural_segment")
+        if _checked_count(counter, value) > config.max_segment_tokens:
+            if (first, last) not in exception_spans:
+                raise ValueError("meaning_length_invariant_failed")
+            exception_ids.append(len(segments))
         first = last + 1
     validate(text, [asdict(segment) for segment in segments])
     for index in range(len(features)):
         if index in lengths:
-            sources[index].append("hard_token_limit")
-            reasons[index].append("selected_hard_token_limit")
-            if blocked[index]:
-                reasons[index].append("forced_structure_dependency")
+            sources[index].append("length_fallback")
+            reasons[index].append("selected_length_fallback")
         elif index not in selected and not sources[index]:
             reasons[index].append("not_nominated")
             reasons[index].append("upstream_" + decision.gaps[index].reason)
     traces = tuple(MeaningGapDecision(index, index in selected, tuple(dict.fromkeys(sources[index])),
                   tuple(dict.fromkeys(reasons[index])), tuple(dict.fromkeys(evidence[index]))) for index in range(len(features)))
     return MeaningPartition(tuple(segments), tuple(sorted(semantic)), structural_selected, lengths,
-                            tuple(sorted(nominated - set(semantic))), tuple(i for i in sorted(selected) if blocked[i]),
+                            tuple(sorted(nominated - set(semantic))), tuple(exception_ids),
                             traces, blocks, tuple(unavailable))

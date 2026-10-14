@@ -13,10 +13,10 @@ import math
 from pathlib import Path
 import re
 
-COHERENT_RULE_VERSION = "semantic-coherent-ugc-1.0"
-COHERENT_IMPLEMENTATION_VERSION = "semantic-coherent-ugc-1.0-meaning-v4-1"
-COHERENT_PARTITION_ID = "experimental-meaning-units-4"
-CURRENT_FROZEN_SETTINGS_SHA256 = "cef1f8dd506b3ddd3a1a8b31171f7e4737da8d671a2afa405bb192fefb7d22da"
+COHERENT_RULE_VERSION = "semantic-coherent-ugc-1.1"
+COHERENT_IMPLEMENTATION_VERSION = "semantic-coherent-ugc-1.1-layers-1"
+COHERENT_PARTITION_ID = "meaning-layers-1"
+CURRENT_FROZEN_SETTINGS_SHA256 = "c74294930e24691bb06393d93595c4a9ea98205b3bb71b7b4f540b5df9cb2393"
 RUN_KIND = "semantic-text-segmentation-run"
 
 
@@ -46,7 +46,13 @@ class CoherentSemanticConfig:
     """边界计算与候选单元参数；任何非法值在模型运行之前拒绝。
 
     token限制约束正文，模型输入含模板上限由EmbeddingConfig约束。
-    epsilon用于峰值／平台容差，不能作为跨硬件效果验收阈值。
+    epsilon用于峰值／平台容差，不能作为跨硬件效果验收阈值。1.1起不再设
+    全局最短段字符门槛：正文中间的短段（小标题、单句感受）可以独立成段。
+    edge_segment_nonspace_chars只约束帖子首段和末段：非空白字符不足该值
+    的首末段并入相邻段，因为开头一句话、结尾一句招呼单独成段不符合人的
+    切分习惯。
+    max_segment_tokens是长度兜底的触发线，不是硬上限；无法在允许位置
+    补切的段保留原文并记为长度异常。
     """
 
     unit_max_tokens: int = 64
@@ -54,7 +60,7 @@ class CoherentSemanticConfig:
     absolute_cohesion_threshold: float = 0.55
     depth_floor: float = 0.05
     depth_std_factor: float = 0.5
-    min_segment_nonspace_chars: int = 16
+    edge_segment_nonspace_chars: int = 16
     max_segment_tokens: int = 512
     epsilon: float = 1e-6
     smoothing: int = 0
@@ -64,7 +70,7 @@ class CoherentSemanticConfig:
         """拒绝旧身份、bool伪装整数、非有限阈值和无意义的长度组合。"""
         if self.rule_version != COHERENT_RULE_VERSION:
             raise ValueError("unknown_semantic_rule_version")
-        for name in ("unit_max_tokens", "window_tokens", "min_segment_nonspace_chars", "max_segment_tokens"):
+        for name in ("unit_max_tokens", "window_tokens", "edge_segment_nonspace_chars", "max_segment_tokens"):
             value = getattr(self, name)
             if type(value) is not int or value < 1:
                 raise ValueError(f"invalid_algorithm_parameter:{name}")
