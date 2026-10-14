@@ -150,8 +150,8 @@ def test_coherent_api_failed_projection_has_no_partial_meaning_result():
     assert provider.model_call_count == 0
 
 
-def test_coherent_hard_limit_has_disjoint_final_counts_and_forced_evidence():
-    """父块超限时只将额外切点算作长度边界，被迫退让证据仍保留。"""
+def test_coherent_length_fallback_has_disjoint_final_counts_without_breaking_protection():
+    """父块超长时只将额外切点算作长度边界；引导语冒号续接不被长度推翻。"""
     parts = ["展馆包含三个部分：", "1、历史厅：" + "甲" * 22 + "。",
              "2、生活厅：" + "乙" * 22 + "。", "3、工艺厅：" + "丙" * 22 + "。"]
     text, units = make_units(parts, "\n")
@@ -160,8 +160,9 @@ def test_coherent_hard_limit_has_disjoint_final_counts_and_forced_evidence():
     actual = choose_semantic_boundaries(text, units, vectors, config, CharacterCounter())
     assert actual.decision.status == "length_split"
     assert actual.decision.semantic_boundaries == () and actual.decision.length_boundaries
-    assert actual.meaning_trace.forced_structure_boundaries == actual.decision.length_boundaries
-    assert "forced_structure_boundary" in actual.decision.reason_codes
+    assert actual.decision.length_boundaries == (1, 2)
+    assert actual.meaning_trace.length_exceptions == ()
+    assert "length_exception" not in actual.decision.reason_codes
     assert all(len(segment.raw_text) <= 48 for segment in actual.segments)
     assert_final_consistency(text, units, actual)
 

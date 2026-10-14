@@ -1,4 +1,4 @@
-"""组合语义评分与冻结连贯块分区；只处理原文、候选及向量。
+"""组合语义评分与分层意思分区；只处理原文、候选及向量。
 
 本层不读取模型、缓存、数据库或帖子ID，完整保存边界来源及保护证据。
 """
@@ -9,7 +9,6 @@ from dataclasses import dataclass, replace
 from typing import Sequence
 
 from .contracts import SemanticDecision, TextSegment, TextUnit, TokenCounter
-from .integrity import WHITE
 from .semantic_boundaries import choose_boundaries
 from .semantic_config import COHERENT_PARTITION_ID, CoherentSemanticConfig, semantic_rule_identity
 from .semantic_meaning import MeaningGapDecision, MeaningPartition, partition_by_meaning
@@ -18,7 +17,7 @@ from .semantic_structure import StructureBlock
 
 @dataclass(frozen=True)
 class MeaningTrace:
-    """冻结v4的完整边界来源，独立于发布摘要保存。
+    """分层分区的完整边界来源，独立于发布摘要保存。
 
     semantic_boundaries和structural_boundaries为原算法来源，可重叠；最终
     SemanticDecision.semantic_boundaries则是二者并集，只计一次非长度切点。
@@ -31,7 +30,7 @@ class MeaningTrace:
     structural_boundaries: tuple[int, ...]
     length_boundaries: tuple[int, ...]
     suppressed_semantic_boundaries: tuple[int, ...]
-    forced_structure_boundaries: tuple[int, ...]
+    length_exceptions: tuple[int, ...]
     gap_decisions: tuple[MeaningGapDecision, ...]
     protected_blocks: tuple[StructureBlock, ...]
     unavailable_structural_spans: tuple[tuple[str, int, int], ...]
@@ -51,8 +50,8 @@ class SemanticDispatchResult:
 
 
 def _coherent_result(initial: SemanticDecision, partition: MeaningPartition,
-                     config: CoherentSemanticConfig, unit_count: int) -> SemanticDispatchResult:
-    """适配冻结结果到既有发布契约，不重新选点或改动正文跨度。
+                     unit_count: int) -> SemanticDispatchResult:
+    """适配分层分区结果到既有发布契约，不重新选点或改动正文跨度。
 
     非长度来源取并集以避免重叠计数；真实来源全部保存在MeaningTrace。
     gap.selected、最终状态和摘要均跟随最终片段，不沿用临时长度选择。
@@ -83,19 +82,16 @@ def _coherent_result(initial: SemanticDecision, partition: MeaningPartition,
     if lengths:
         status = "length_split"
         reasons.append("max_segment_tokens")
-        if any(sum(char not in WHITE for char in segment.raw_text) < config.min_segment_nonspace_chars
-               for segment in partition.segments):
-            reasons.append("short_segment_due_to_limit")
     if partition.suppressed_semantic_boundaries:
         reasons.append("meaning_semantic_boundary_suppressed")
-    if partition.forced_structure_boundaries:
-        reasons.append("forced_structure_boundary")
+    if partition.length_exceptions:
+        reasons.append("length_exception")
     if partition.unavailable_structural_spans:
         reasons.append("structural_boundary_unavailable")
     decision = SemanticDecision(status, tuple(reasons), tuple(gaps), nonlength, partition.length_boundaries)
     trace = MeaningTrace(partition.experiment_id, initial, partition.semantic_boundaries,
                          partition.structural_boundaries, partition.length_boundaries,
-                         partition.suppressed_semantic_boundaries, partition.forced_structure_boundaries,
+                         partition.suppressed_semantic_boundaries, partition.length_exceptions,
                          partition.gap_decisions, partition.protected_blocks, partition.unavailable_structural_spans)
     return SemanticDispatchResult(partition.segments, decision, meaning_trace=trace)
 
@@ -104,7 +100,7 @@ def choose_semantic_boundaries(
     text: str, units: Sequence[TextUnit], vectors: object, config: CoherentSemanticConfig,
     counter: TokenCounter,
 ) -> SemanticDispatchResult:
-    """计算评分并原样执行冻结v4分区，不依赖帖子ID、模型或缓存。
+    """计算评分并原样执行分层意思分区，不依赖帖子ID、模型或缓存。
 
     候选必须覆盖非空白正文，端点字素安全；N≥2要求有效逐单元向量。
     语义／结构来源并集对应最终非长度切点，原始证据另存meaning_trace。
@@ -112,5 +108,4 @@ def choose_semantic_boundaries(
     """
     semantic_rule_identity(config)
     _, initial = choose_boundaries(text, units, vectors, config, counter)
-    return _coherent_result(initial, partition_by_meaning(text, units, initial, config, counter),
-                            config, len(units))
+    return _coherent_result(initial, partition_by_meaning(text, units, initial, config, counter), len(units))

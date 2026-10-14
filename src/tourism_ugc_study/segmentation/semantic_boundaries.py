@@ -198,24 +198,19 @@ def _rank_candidates(
 
 
 def _semantic_cuts(
-    units: Sequence[TextUnit], nonspace_prefix: Sequence[int], cohesion: Sequence[float],
-    depths: Sequence[float], config: CoherentSemanticConfig,
+    cohesion: Sequence[float], depths: Sequence[float], config: CoherentSemanticConfig,
 ) -> tuple[tuple[int, ...], tuple[GapScore, ...]]:
-    """按谷值、余弦、原文位置排序尝试边界，逐次检查新增两侧段的最小长度。"""
+    """选出过深度门槛或绝对连贯度门槛的谷值，按深度、余弦、位置排序。
+
+    1.1起不再以两侧最短字符数抑制谷值：短段本身不构成碎切，必要语义关系
+    的保护由后续规则层负责。返回的切点按原文位置升序。
+    """
     candidates = set(_valley_candidates(cohesion, config.epsilon))
     depth_threshold = max(config.depth_floor, float(np.mean(depths)) + config.depth_std_factor * float(np.std(depths)))
     reasons = ["below_threshold" if index in candidates else "not_local_minimum" for index in range(len(cohesion))]
     selected: list[int] = []
     qualified = [index for index in candidates if depths[index] >= depth_threshold or cohesion[index] <= config.absolute_cohesion_threshold]
     for gap in _rank_candidates(qualified, cohesion, depths, config.epsilon):
-        position = bisect_left(selected, gap)
-        left_unit = selected[position - 1] + 1 if position else 0
-        right_unit = selected[position] if position < len(selected) else len(units) - 1
-        left_size = nonspace_prefix[units[gap].end] - nonspace_prefix[units[left_unit].start]
-        right_size = nonspace_prefix[units[right_unit].end] - nonspace_prefix[units[gap + 1].start]
-        if min(left_size, right_size) < config.min_segment_nonspace_chars:
-            reasons[gap] = "min_segment_nonspace_chars"
-            continue
         insort(selected, gap)
         reasons[gap] = "semantic_depth" if depths[gap] >= depth_threshold else "semantic_absolute_cohesion"
     selected_set = set(selected)
@@ -226,16 +221,16 @@ def _semantic_cuts(
 
 def _length_cuts(
     text: str, units: Sequence[TextUnit], semantic_cuts: Sequence[int], gaps: Sequence[GapScore],
-    nonspace_prefix: Sequence[int], config: CoherentSemanticConfig, counter: TokenCounter,
-) -> tuple[tuple[int, ...], bool]:
-    """对完整原文子串精确重计，在硬上限内优先避免短尾段。
+    config: CoherentSemanticConfig, counter: TokenCounter,
+) -> tuple[int, ...]:
+    """对完整原文子串精确重计，给出初始评分阶段的临时长度切点。
 
     BPE计数不保证随前缀长度单调，因此遍历全部单元边界，不在首个超限处
     提前停止。候选排序优先深度／低连贯度，全等时取靠后边界。每轮至少
     消耗一个单元，所以有限终止；不可表示时抛错，不截断或返回部分成功。
+    这里只服务初始决策的完整性，最终长度兜底由意思分区器重新规划。
     """
     cuts: list[int] = []
-    short_due_to_limit = False
     start_unit = 0
     counts: dict[tuple[int, int], int] = {}
     cohesion = tuple(gap.cohesion for gap in gaps)
@@ -253,17 +248,11 @@ def _length_cuts(
             feasible = [gap for gap in range(start_unit, end_unit) if count_span(start_unit, gap) <= config.max_segment_tokens]
             if not feasible:
                 raise ValueError("unsplittable_segment_limit")
-            preferred = [gap for gap in feasible
-                         if min(nonspace_prefix[units[gap].end] - nonspace_prefix[units[start_unit].start],
-                                nonspace_prefix[units[end_unit].end] - nonspace_prefix[units[gap + 1].start]) >= config.min_segment_nonspace_chars]
-            pool = preferred or feasible
-            if not preferred:
-                short_due_to_limit = True
-            gap = _rank_candidates(pool, cohesion, depths, config.epsilon, prefer_later=True)[0]
+            gap = _rank_candidates(feasible, cohesion, depths, config.epsilon, prefer_later=True)[0]
             cuts.append(gap)
             start_unit = gap + 1
         start_unit = end_unit + 1
-    return tuple(cuts), short_due_to_limit
+    return tuple(cuts)
 
 
 def choose_boundaries(
@@ -279,7 +268,7 @@ def choose_boundaries(
     其消息为稳定原因代码；调用层负责将整帖标为failed，禁止发布部分结果。
     """
     _validate_config(config)
-    nonspace_prefix = _validate_units(text, units, token_counter)
+    _validate_units(text, units, token_counter)
     if not units:
         return (), SemanticDecision(status="empty", reason_codes=("empty_text",), gaps=(), semantic_boundaries=(), length_boundaries=())
     gaps: tuple[GapScore, ...] = ()
@@ -288,8 +277,8 @@ def choose_boundaries(
         normalized = _normalized_vectors(vectors, len(units))
         cohesion = _cohesion(units, normalized, config.window_tokens)
         depths = _depth_scores(cohesion, config.epsilon)
-        semantic_cuts, gaps = _semantic_cuts(units, nonspace_prefix, cohesion, depths, config)
-    length_cuts, short_due_to_limit = _length_cuts(text, units, semantic_cuts, gaps, nonspace_prefix, config, token_counter)
+        semantic_cuts, gaps = _semantic_cuts(cohesion, depths, config)
+    length_cuts = _length_cuts(text, units, semantic_cuts, gaps, config, token_counter)
     length_set = set(length_cuts)
     gaps = tuple(GapScore(index=gap.index, cohesion=gap.cohesion, depth=gap.depth, candidate=gap.candidate,
                           selected=gap.selected or gap.index in length_set,
@@ -302,12 +291,8 @@ def choose_boundaries(
         start_unit = last_unit + 1
     status = "single_unit" if len(units) == 1 else "scored_split" if semantic_cuts else "scored_keep"
     reasons = ["single_unit" if len(units) == 1 else "semantic_boundary_selected" if semantic_cuts else "no_semantic_boundary"]
-    if any(gap.reason == "min_segment_nonspace_chars" for gap in gaps):
-        reasons.append("min_segment_nonspace_chars")
     if length_cuts:
         status = "length_split"
         reasons.append("max_segment_tokens")
-    if short_due_to_limit:
-        reasons.append("short_segment_due_to_limit")
     return tuple(segments), SemanticDecision(status=status, reason_codes=tuple(reasons), gaps=gaps,
                                             semantic_boundaries=semantic_cuts, length_boundaries=length_cuts)

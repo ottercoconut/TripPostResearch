@@ -67,8 +67,8 @@ AutoDL-r2已完成17,853条纯预测，另承接1,402条同规范正文人工证
 
 ## 文本切分
 
-文本编码采用embedding自然语义分段；当前已冻结`semantic-coherent-ugc-1.0`连贯块算法、
-Qwen3-Embedding-8B及参数，真实全量和正式发布仍待验收。`objective-structure-0.5`已在独立`segmentation`模块中实现，旧发布结果为
+文本编码采用embedding自然语义分段；`semantic-coherent-ugc-1.0`连贯块算法已冻结并完成全量运行，
+当前代码为`semantic-coherent-ugc-1.1`分层规则候选（规则管禁止切与换天必切，模型只在灰色地带选择），待用户确认后冻结；正式发布仍待验收。`objective-structure-0.5`已在独立`segmentation`模块中实现，旧发布结果为
 10,914帖／191,844段，通过`source_post_id`关联原帖，TripPostAdmin已接入。
 旧算法仅保留历史归档，当前代码已移除旧客观和0.1／0.2兼容；新的TextTiling语义工程路径使用冻结规则，正式活动结果是否切换见B05。
 两种算法共用`text_segments`七字段结构，新批次使用新的发布包与片段身份。

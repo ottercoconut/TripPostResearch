@@ -109,16 +109,16 @@ def test_two_units_can_split_without_exceeding_length_limit():
     assert output.summary()["embedded_unit_count"] == 2
 
 
-def test_three_units_match_endpoint_valley_and_short_posts_can_stay_whole():
-    """接口不改变纯计算N=3决策，也不把短句低相似度直接等同于必切。"""
+def test_three_units_match_endpoint_valley_and_short_edges_are_merged():
+    """接口不改变纯计算N=3决策；模型选中的切点若留下过短首末段，则并回相邻段。"""
     body = "甲" * 15 + "。" + "乙" * 15 + "。" + "丙" * 15 + "。"
     output = semantic(body)
     assert output.decision.semantic_boundaries == (0,)
     assert len(output.result.text_segments) == 2
     short = semantic("甲。乙。")
     assert short.decision.status == "scored_keep" and short.embedded_unit_count == 2
-    assert "meaning_semantic_boundary_suppressed" in short.decision.reason_codes
     assert [segment.raw_text for segment in short.result.text_segments] == ["甲。乙。"]
+    assert short.decision.gaps[0].reason == "meaning_boundary_suppressed"
 
 
 def test_delta_body_projection_hash_and_original_offsets_are_preserved():
@@ -198,15 +198,25 @@ def test_corrupt_cache_raises_without_model_retry(tmp_path):
     assert provider.model_call_count == 1
 
 
-def test_long_unpunctuated_body_is_covered_without_provider_truncation():
-    """长帖经候选细分和硬长度切分后仍覆盖全原文，且模型接收有界单元。"""
+def test_long_unpunctuated_body_is_kept_whole_as_length_exception():
+    """无标点无空白的长帖只有句内位置，长度兜底不切断，整段保留并标记异常。"""
     body = "甲" * 1100
     provider = SyntheticProvider()
     output = semantic(body, provider)
-    assert output.result.status == "completed" and output.decision.status == "length_split"
+    assert output.result.status == "completed" and output.decision.status == "scored_keep"
+    assert "length_exception" in output.decision.reason_codes
     assert len(output.units) > 1 and all(len(text) <= 64 for text in provider.calls[0])
+    assert [segment.raw_text for segment in output.result.text_segments] == [body]
+    validate(body, [asdict(segment) for segment in output.result.text_segments])
+
+
+def test_space_separated_long_body_uses_spaces_only_as_length_fallback():
+    """以空格代替标点的长文，长度兜底可在空白处补切，覆盖全文且不超长。"""
+    body = " ".join(["甲" * 40] * 30)
+    output = semantic(body)
+    assert output.decision.status == "length_split"
+    assert "length_exception" not in output.decision.reason_codes
     assert all(len(segment.raw_text) <= 512 for segment in output.result.text_segments)
-    assert "".join(segment.raw_text for segment in output.result.text_segments) == body
     validate(body, [asdict(segment) for segment in output.result.text_segments])
 
 

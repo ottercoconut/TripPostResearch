@@ -12,7 +12,7 @@ from tourism_ugc_study.segmentation.semantic_config import (
 
 @pytest.mark.parametrize("field,value", [
     ("unit_max_tokens", 0), ("window_tokens", -1), ("window_tokens", True),
-    ("min_segment_nonspace_chars", 0), ("max_segment_tokens", 32),
+    ("max_segment_tokens", 32),
     ("absolute_cohesion_threshold", float("nan")), ("absolute_cohesion_threshold", 1.1),
     ("depth_floor", 0), ("depth_std_factor", -1), ("epsilon", 0),
     ("epsilon", float("inf")), ("smoothing", 1), ("smoothing", False),
