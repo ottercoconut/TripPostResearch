@@ -114,6 +114,18 @@ def validate_run_manifest(manifest: dict) -> None:
             or any(type(manifest.get(key)) is not int or manifest[key] != 0 for key in
                    ("source_database_write_count", "membership_database_write_count"))):
         raise ValueError("语义决策总计或只读来源声明非法")
+    # 只读缓存运行不加载模型，必须声明来源运行且不能出现任何模型调用。
+    vector_source = manifest.get("vector_source")
+    if vector_source == {"mode": "model"}:
+        pass
+    elif (not isinstance(vector_source, dict)
+            or set(vector_source) != {"mode", "identity_source_manifest", "identity_source_manifest_sha256"}
+            or vector_source["mode"] != "cache_only"
+            or not isinstance(vector_source["identity_source_manifest"], str)
+            or not _sha256(vector_source["identity_source_manifest_sha256"])
+            or counts["model_call_count"] != 0 or manifest.get("preflight_model_call_count") != 0
+            or counts["cache_hit_count"] != counts["embedded_unit_count"]):
+        raise ValueError("语义运行向量来源声明非法")
     _validate_semantic_identity(manifest)
 
 

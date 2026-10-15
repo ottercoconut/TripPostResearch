@@ -10,6 +10,7 @@ from collections import Counter
 from dataclasses import asdict
 from datetime import datetime, timezone
 import hashlib
+import json
 import os
 from pathlib import Path
 import time
@@ -18,7 +19,7 @@ from typing import Callable
 from .artifacts import canonical_json, new_run_directory, write_json
 from .artifacts import runtime_identity
 from .config import ResearchInput
-from .embedding import QwenEmbeddingProvider, identity_sha256, validate_vectors
+from .embedding import CacheOnlyProvider, QwenEmbeddingProvider, identity_sha256, validate_vectors
 from .embedding_cache import EmbeddingCache
 from .projection import PROJECTION_ID
 from .semantic_api import segment_body_semantic
@@ -43,7 +44,7 @@ def run_semantic_batch(
     seed: int | None = None, progress: Callable[[int, int], None] | None = None,
     state: Callable[[dict], None] | None = None, code_snapshot: dict | None = None,
     resource_supervision: dict | None = None,
-    members_path: Path | None = None,
+    members_path: Path | None = None, cache_only_source: Path | None = None,
 ) -> dict:
     """生成全量或显式开发成员运行包，不切换Admin或写源库。
 
@@ -54,6 +55,10 @@ def run_semantic_batch(
     code_snapshot由监督者绑定执行副本；直接调用则在运行包内保存当前源码并复验。
     FrozenDevelopmentInput自动固定包内全部成员，始终development；只读取案例，
     不访问源库。其逐帖source_snapshot_sha256明确继承parent来源引用。
+    cache_only_source指向既有正式运行目录时进入只读缓存模式：沿用该运行
+    记录的模型身份，只加载tokenizer，不做模型预检，向量全部从只读缓存读取，
+    缺任何一条即整轮失败。只适用于候选单元未变的规则修订；manifest记录
+    来源运行清单摘要，model_call_count必然为0。
     """
     rule_version, implementation_version = semantic_rule_identity(settings.algorithm)
     offline = isinstance(config, FrozenDevelopmentInput)
@@ -72,6 +77,20 @@ def run_semantic_batch(
     if (runtime["implementation"] != "CPython" or runtime["python"] != "3.13.5"
             or runtime["regex"] != "2026.7.19"):
         raise ValueError("切分验收要求CPython 3.13.5与regex 2026.7.19")
+    vector_source = {"mode": "model"}
+    recorded_identity = None
+    if cache_only_source is not None:
+        source_manifest = Path(cache_only_source).resolve() / "manifest.json"
+        recorded = json.loads(source_manifest.read_text(encoding="utf-8"))
+        recorded_identity = recorded.get("model_identity")
+        # 只接受同一配置声明下的完整正式运行；身份摘要不符说明清单被改动。
+        if (recorded.get("artifact_kind") != RUN_KIND or recorded.get("scope") != "full_corpus"
+                or recorded.get("status") != "completed" or not isinstance(recorded_identity, dict)
+                or identity_sha256(recorded_identity) != recorded.get("model_identity_sha256")):
+            raise ValueError("cache_only_source_run_invalid")
+        validate_identity_settings(recorded_identity, settings.embedding)
+        vector_source = {"mode": "cache_only", "identity_source_manifest": str(source_manifest),
+                         "identity_source_manifest_sha256": file_sha256(source_manifest)}
     output.parent.mkdir(parents=True, exist_ok=True)
     attempt = output.with_name(output.name + ".attempt.json")
     started = _now()
@@ -102,22 +121,29 @@ def run_semantic_batch(
             snapshot = code_snapshot or freeze_code(staging / "code-snapshot")
             phase("model_loading")
             if provider is None:
-                provider = QwenEmbeddingProvider(**asdict(settings.embedding), local_files_only=True)
-            # 实际模型预检绕过cache，与真实语料统计分开。
+                provider = (CacheOnlyProvider(recorded_identity=recorded_identity) if recorded_identity
+                            else QwenEmbeddingProvider(**asdict(settings.embedding), local_files_only=True))
             identity = provider.identity
             validate_identity_settings(identity, settings.embedding)
             model_hash = identity_sha256(identity)
-            phase("model_preflight")
-            preflight_calls_before = provider.model_call_count
-            probe = provider.encode(["海边散步，海风很轻。", "公交车站就在路口。"])
-            preflight_model_call_count = provider.model_call_count - preflight_calls_before
-            validate_vectors(probe, count=2, dimension=identity["dimension"])
+            if recorded_identity is not None:
+                # 无模型可预检；身份必须与来源运行完全一致，缓存命名空间才是同一批向量。
+                if model_hash != identity_sha256(recorded_identity):
+                    raise ValueError("cache_only_identity_mismatch")
+                preflight_model_call_count = 0
+            else:
+                # 实际模型预检绕过cache，与真实语料统计分开。
+                phase("model_preflight")
+                preflight_calls_before = provider.model_call_count
+                probe = provider.encode(["海边散步，海风很轻。", "公交车站就在路口。"])
+                preflight_model_call_count = provider.model_call_count - preflight_calls_before
+                validate_vectors(probe, count=2, dimension=identity["dimension"])
             if members_path is not None:
                 from .semantic_evaluation import validate_development_units
                 frozen = validate_development_units(members_path, config, settings=settings, counter=provider)
                 if post_ids is None or set(post_ids) != set(frozen.manifest["post_ids"]):
                     raise ValueError("development_members_identity_mismatch")
-            cache = EmbeddingCache(cache_dir, identity)
+            cache = EmbeddingCache(cache_dir, identity, readonly=recorded_identity is not None)
             phase("corpus_processing")
             context = open_frozen_development_corpus(config) if offline else open_research_corpus(config)
             with context as corpus:
@@ -197,7 +223,7 @@ def run_semantic_batch(
                 "input": source_identity, "input_paths": {k: str(v) for k, v in asdict(config).items()},
                 "config": asdict(settings), "config_sha256": settings.fingerprint,
                 "model_identity": identity, "model_identity_sha256": model_hash,
-                "preflight_model_call_count": preflight_model_call_count,
+                "vector_source": vector_source, "preflight_model_call_count": preflight_model_call_count,
                 "selected_post_ids": seen if post_ids is not None else None,
                 "seed": seed, "sampling": "explicit_development_members" if post_ids is not None else "all_keep_ordered_by_source_post_id",
                 "started_at_utc": started, "completed_at_utc": _now(),
@@ -233,7 +259,9 @@ def run_semantic_batch(
                       "code_snapshot_changed_during_run", "code_changed_during_run",
                       "development_members_identity_mismatch", "frozen_development_input_changed",
                       "frozen_development_input_binding_mismatch", "development_cases_digest_mismatch",
-                      "development_cases_changed", "development_manifest_changed"}
+                      "development_cases_changed", "development_manifest_changed",
+                      "cache_only_identity_mismatch", "cache_entry_missing", "cache_namespace_missing",
+                      "cache_only_tokenizer_identity_mismatch", "cache_only_inference_forbidden"}
         if str(exc) in safe_codes:
             attempt_data["error_code"] = str(exc)
         raise

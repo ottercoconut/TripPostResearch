@@ -260,3 +260,70 @@ def test_cache_cannot_create_run_output_before_atomic_publication(tmp_path, insi
         run_semantic_batch(config, output, settings=settings(), code_version="test",
                            provider=provider, cache_dir=cache_dir)
     assert not output.exists() and provider.calls == []
+
+
+def _cache_only_fixture(tmp_path):
+    """先用合成模型完成一次正式全量，提供只读重算所需的来源运行与缓存。"""
+    config = make_input(tmp_path, rows=[(1, "甲" * 15 + "。" + "乙" * 15 + "。", "keep"),
+                                        (2, "丁" * 15 + "。" + "丙" * 15 + "。", "keep"),
+                                        (3, "海边真好看。", "keep")])
+    source = run_semantic_batch(config, tmp_path / "model-run", settings=settings(), code_version="test",
+                                provider=SyntheticProvider())
+    assert source["status"] == "completed" and source["vector_source"] == {"mode": "model"}
+    return config
+
+
+def test_cache_only_run_reproduces_segments_without_any_inference(tmp_path):
+    """只读缓存重算与来源运行切点一致，provider从不推理且清单声明来源运行。"""
+    config = _cache_only_fixture(tmp_path)
+    provider = SyntheticProvider()
+    manifest = run_semantic_batch(config, tmp_path / "cache-run", settings=settings(), code_version="test",
+                                  provider=provider, cache_dir=tmp_path / ".semantic-vector-cache",
+                                  cache_only_source=tmp_path / "model-run")
+    assert provider.calls == [] and manifest["status"] == "completed"
+    assert manifest["counts"]["model_call_count"] == 0 and manifest["preflight_model_call_count"] == 0
+    assert manifest["counts"]["cache_hit_count"] == manifest["counts"]["embedded_unit_count"] == 4
+    assert manifest["vector_source"] == {
+        "mode": "cache_only", "identity_source_manifest": str(tmp_path / "model-run" / "manifest.json"),
+        "identity_source_manifest_sha256": file_sha256(tmp_path / "model-run" / "manifest.json")}
+    segments = lambda run: [row["text_segments"] for row in read_rows(tmp_path / run / "posts.jsonl")]
+    assert segments("cache-run") == segments("model-run")
+
+
+def test_cache_only_run_fails_on_missing_vector_instead_of_recomputing(tmp_path):
+    """缺任一缓存向量即整轮失败、不发布，也不借provider补算。"""
+    config = _cache_only_fixture(tmp_path)
+    vectors = sorted((tmp_path / ".semantic-vector-cache").glob("*/*/vector.npy"))
+    __import__("shutil").rmtree(vectors[0].parent)
+    provider = SyntheticProvider()
+    with pytest.raises(EmbeddingError, match="cache_entry_missing"):
+        run_semantic_batch(config, tmp_path / "cache-run", settings=settings(), code_version="test",
+                           provider=provider, cache_dir=tmp_path / ".semantic-vector-cache",
+                           cache_only_source=tmp_path / "model-run")
+    assert provider.calls == [] and not (tmp_path / "cache-run").exists()
+    attempt = json.loads((tmp_path / "cache-run.attempt.json").read_text())
+    assert attempt["status"] == "failed" and attempt["error_code"] == "cache_entry_missing"
+
+
+def test_cache_only_run_rejects_identity_other_than_source_run(tmp_path):
+    """provider身份须与来源运行记录逐字节一致，否则缓存命名空间不是同一批向量。"""
+    config = _cache_only_fixture(tmp_path)
+    provider = SyntheticProvider()
+    provider.identity["assets_sha256"] = {"synthetic-fixture": "c" * 64}
+    with pytest.raises(ValueError, match="cache_only_identity_mismatch"):
+        run_semantic_batch(config, tmp_path / "cache-run", settings=settings(), code_version="test",
+                           provider=provider, cache_dir=tmp_path / ".semantic-vector-cache",
+                           cache_only_source=tmp_path / "model-run")
+    assert not (tmp_path / "cache-run").exists()
+
+
+def test_cache_only_source_must_be_complete_full_run(tmp_path):
+    """开发样本或被改动的来源清单不能作为只读重算的身份依据。"""
+    config = _cache_only_fixture(tmp_path)
+    run_semantic_batch(config, tmp_path / "development", settings=settings(), code_version="test",
+                       provider=SyntheticProvider(), post_ids=(1, 2))
+    with pytest.raises(ValueError, match="cache_only_source_run_invalid"):
+        run_semantic_batch(config, tmp_path / "cache-run", settings=settings(), code_version="test",
+                           provider=SyntheticProvider(), cache_dir=tmp_path / ".semantic-vector-cache",
+                           cache_only_source=tmp_path / "development")
+    assert not (tmp_path / "cache-run.attempt.json").exists()

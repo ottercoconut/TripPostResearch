@@ -27,6 +27,7 @@ def main() -> int:
     ingest.add_argument("--run", type=Path, required=True)
     ingest.add_argument("--output", type=Path, required=True)
     ingest.add_argument("--config", type=Path, default=ROOT / "configs/text-segmentation-research.json")
+    ingest.add_argument("--code-version", help="无.git的远端源码包显式给出非空来源描述并跳过Git")
     verify = commands.add_parser("verify")
     verify.add_argument("--bundle", type=Path, required=True)
     sample = commands.add_parser("sample")
@@ -40,9 +41,15 @@ def main() -> int:
     args = parser.parse_args()
     try:
         if args.command == "import":
-            version = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
-            if subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True).strip():
-                version += "+dirty"
+            if args.code_version is not None:
+                if not args.code_version.strip():
+                    raise ValueError("--code-version必须是非空来源描述")
+                # 导入模块逐文件摘要另写入发布清单，描述只说明来源，不代替字节身份。
+                version = args.code_version
+            else:
+                version = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+                if subprocess.check_output(["git", "status", "--porcelain"], cwd=ROOT, text=True).strip():
+                    version += "+dirty"
             result = import_segmentation_run(args.run, args.output, load_research_input(args.config), code_version=version)
         elif args.command == "verify":
             result = verify_segment_bundle(args.bundle)

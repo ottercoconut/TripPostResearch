@@ -31,11 +31,15 @@ def main() -> int:
     parser.add_argument("--total-timeout", type=float, default=14400, help="语义整轮预算秒数，默认14400")
     parser.add_argument("--resource-policy", type=Path, help="Linux/CUDA显式资源门JSON")
     parser.add_argument("--code-version", help="显式非空来源描述并跳过Git；实际执行身份始终由code_snapshot.sha256绑定")
+    parser.add_argument("--cache-only-from", type=Path,
+                        help="既有正式运行目录；沿用其模型身份，只读缓存向量、不加载模型，须同时给--cache-dir")
     args = parser.parse_args()
     if args.frozen_input and (args.config is not None or args.members is not None):
         parser.error("--frozen-input与显式--config/--members互斥")
     if args.code_version is not None and not args.code_version.strip():
         parser.error("--code-version必须是非空来源描述")
+    if args.cache_only_from is not None and (args.cache_dir is None or args.resource_policy is not None):
+        parser.error("--cache-only-from须显式给--cache-dir，且不使用显卡资源政策")
     try:
         from tourism_ugc_study.segmentation.semantic_config import (
             CoherentSemanticConfig, load_semantic_settings, validate_current_frozen_settings,
@@ -63,12 +67,23 @@ def main() -> int:
         from tourism_ugc_study.segmentation.semantic_resources import load_linux_resource_policy
         members = load_development_members(args.members, source) if args.members else None
         policy = load_linux_resource_policy(args.resource_policy) if args.resource_policy else None
-        result = run_guarded_semantic_batch(source, args.output, code_version=version,
-            settings=settings, cache_dir=args.cache_dir,
-            post_ids=tuple(members["post_ids"]) if members else None,
-            seed=members["seed"] if members else None, members_path=args.members.resolve() if args.members else None,
-            limits=SemanticRuntimeLimits(load_seconds=args.load_timeout, post_seconds=args.post_timeout,
-                                         total_seconds=args.total_timeout), resource_policy=policy, progress=progress)
+        if args.cache_only_from is not None:
+            # 不加载模型，无显卡资源可监督；源码快照由批处理自身写入运行包并复验。
+            from tourism_ugc_study.segmentation.semantic_batch import run_semantic_batch
+            result = run_semantic_batch(source, args.output, code_version=version, settings=settings,
+                cache_dir=args.cache_dir, post_ids=tuple(members["post_ids"]) if members else None,
+                seed=members["seed"] if members else None,
+                members_path=args.members.resolve() if args.members else None,
+                cache_only_source=args.cache_only_from, progress=progress)
+        else:
+            result = run_guarded_semantic_batch(source, args.output, code_version=version,
+                settings=settings, cache_dir=args.cache_dir,
+                post_ids=tuple(members["post_ids"]) if members else None,
+                seed=members["seed"] if members else None,
+                members_path=args.members.resolve() if args.members else None,
+                limits=SemanticRuntimeLimits(load_seconds=args.load_timeout, post_seconds=args.post_timeout,
+                                             total_seconds=args.total_timeout),
+                resource_policy=policy, progress=progress)
     except KeyboardInterrupt:
         print("切分运行中断：KeyboardInterrupt", file=sys.stderr)
         return 130

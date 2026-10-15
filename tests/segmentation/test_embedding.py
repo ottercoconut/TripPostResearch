@@ -344,3 +344,44 @@ def test_probe_missing_assets_produces_failure_without_loading(tmp_path, monkeyp
     assert result["status"] == "failed"
     assert result["error_type"] == "FileNotFoundError"
     assert not result["devices"]
+
+
+def _tokenizer_identity():
+    """只含tokenizer可观察字段的合成身份，对应CPU上真实可加载的部分。"""
+    return {"provider": "qwen-transformers-local-v1", "model_id": "Qwen/Qwen3-Embedding-8B",
+            "model_revision": "1" * 40, "tokenizer_revision": "1" * 40, "dimension": 4096,
+            "instruction": "Retrieve semantically similar text", "template": "Instruct: {instruction}\nQuery:{text}",
+            "special_tokens": "tokenizer_native_no_manual_eos", "eos_token_id": 1, "pad_token_id": 1,
+            "padding_side": "left", "max_input_tokens": 256, "truncation": False,
+            "native_normalizer": "NFC()", "offset_policy": "original_grapheme_envelope",
+            "assets_sha256": {"tokenizer.json": "a" * 64},
+            "dependencies": {"transformers": "4", "tokenizers": "0.2"}}
+
+
+@pytest.mark.parametrize("edit", [
+    None,
+    lambda i: i["assets_sha256"].update({"tokenizer.json": "b" * 64}),
+    lambda i: i["dependencies"].update(tokenizers="0.3"),
+    lambda i: i.update(native_normalizer="NFKC()"),
+])
+def test_cache_only_provider_requires_recorded_tokenizer_and_never_infers(monkeypatch, edit):
+    """tokenizer资产／依赖与记录身份不一致即拒绝；一致时对外沿用记录身份且禁止推理。"""
+    from tourism_ugc_study.segmentation.embedding import CacheOnlyProvider
+
+    def synthetic_counter(self, **kwargs):
+        """跳过真实tokenizer加载，只给出与CPU加载结果同形的身份。"""
+        self.identity = _tokenizer_identity()
+
+    monkeypatch.setattr(QwenTokenCounter, "__init__", synthetic_counter)
+    recorded = {**_tokenizer_identity(), "device": "cuda", "dtype": "bfloat16", "cuda_device_uuid": "GPU-x",
+                "assets_sha256": {"tokenizer.json": "a" * 64, "model.safetensors": "c" * 64},
+                "dependencies": {"transformers": "4", "tokenizers": "0.2", "torch": "2"}}
+    if edit is not None:
+        edit(recorded)
+        with pytest.raises(EmbeddingError, match="cache_only_tokenizer_identity_mismatch"):
+            CacheOnlyProvider(recorded_identity=recorded)
+        return
+    provider = CacheOnlyProvider(recorded_identity=recorded)
+    assert provider.identity == recorded and provider.model_call_count == 0
+    with pytest.raises(EmbeddingError, match="cache_only_inference_forbidden"):
+        provider.encode(["海边"])
