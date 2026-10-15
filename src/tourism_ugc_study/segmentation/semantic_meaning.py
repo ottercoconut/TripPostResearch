@@ -28,7 +28,7 @@ from .semantic_structure import (
     discover_structure_blocks,
 )
 
-EXPERIMENT_ID = "meaning-layers-1"
+EXPERIMENT_ID = "meaning-layers-2"
 _LINES = re.compile(r"\r\n|[\r\n\u2028\u2029]")
 _DAY = re.compile(r"(?:day\s*\d+|d\s*\d+|第[0-9一二三四五六七八九十百]+天)(?![0-9])", re.I)
 _DATE = re.compile(r"(?:\d{2,4}年)?\d{1,2}月\d{1,2}日")
@@ -466,6 +466,46 @@ def _merge_fragments(text: str, units: Sequence[TextUnit], cuts: Sequence[int], 
     return tuple(kept), merged
 
 
+# 列表符号与话题标签不是题头标记；以它们开头的“标签行”多是清单条目或尾部标签。
+_LIST_MARKS = frozenset("-·•*▪▫◦‧・#＃")
+_OPEN_MARKS = frozenset("【[〖「『〔")
+_KEYCAP = re.compile(r"^\d\ufe0f?\u20e3")
+
+
+def _marked_heading(line: str) -> bool:
+    """该行以题头标记开头：emoji 或符号、开方括号、编号、键帽数字或日程词。
+
+    1.1 的标签行判断较宽，会把以 emoji 结尾的普通句子、清单条目也当作标签；
+    这种宽判断用于否决切分是保守的，但用于上移切点会切进句子中间。上移只
+    针对人一眼能认出的题头，例如“⭐️景点必去打卡”“四、行程安排”“[二R]渔家”。
+    """
+    body = line.lstrip("".join(WHITE))
+    if not body or body[0] in _LIST_MARKS:
+        return False
+    if body[0] in _OPEN_MARKS or _NUMBER.match(body) or _KEYCAP.match(body) or _DAY.match(body):
+        return True
+    return unicodedata.category(body[0]) in ("So", "Sk")
+
+
+def _before_label_lines(features: Sequence, labels: Sequence[bool], index: int) -> int | None:
+    """返回标签行之前的换行 gap；index 是标签行之后、被否决的 gap。
+
+    向上跨过紧邻的连续标签行（如“⭐️景点必去打卡”上面还有一行标签），
+    找到第一处不是“标签行之后”的换行 gap。标签行位于帖首时没有可用位置，
+    返回 None。只在既有 gap 上移动，不新增 gap；目标处是否允许切由调用者判断。
+    """
+    gap = index
+    while True:
+        unit = gap
+        while unit > 0 and features[unit - 1].boundary_kind != "line":
+            unit -= 1
+        if unit == 0:
+            return None
+        if not labels[unit - 1]:
+            return unit - 1
+        gap = unit - 1
+
+
 _COHERENT_KINDS = frozenset({"coherent_enumeration", "coherent_schedule", "coherent_directory", "coherent_item"})
 
 
@@ -475,7 +515,10 @@ def partition_by_meaning(text: str, units: Sequence[TextUnit], decision: Semanti
 
     禁止切（一票否决，长度也不能推翻）：句内续接、同一行内的配对括号、题头与
     首说明、纯标签小标题之后、尾部标签（含句末同行的标签），以及
-    semantic_relations 识别的强依赖词、未完结条件和括号说明。
+    semantic_relations 识别的强依赖词、未完结条件和括号说明。唯一例外是只被
+    “纯标签小标题之后”否决的提名：若标签行以题头标记开头（emoji、编号、
+    方括号等），标签应随后文，故切点上移到标签行之前（若该处允许切），
+    换天属性随之保留，而不是直接丢弃这个分界。
     句内位置不供语义或小标题选择；无标点长文中以空白分隔的位置只作为长度
     兜底的最后手段。
     换天必切：叙述中的日程题头只要未被禁止即切开。灰色地带：其余结构提名
@@ -508,7 +551,7 @@ def partition_by_meaning(text: str, units: Sequence[TextUnit], decision: Semanti
     meta_tail = len(units)
     while meta_tail > 1 and _metadata(text[units[meta_tail - 1].start:units[meta_tail - 1].end]):
         meta_tail -= 1
-    blocked, ranks, reasons, evidence, sources = [], [], [], [], []
+    blocked, ranks, reasons, evidence, sources, labels, label_only = [], [], [], [], [], [], []
     original = set(decision.semantic_boundaries)
     absolute = {index for index, feature in enumerate(features)
                 if feature.natural_boundary and decision.gaps[index].cohesion <= config.absolute_cohesion_threshold}
@@ -549,6 +592,10 @@ def partition_by_meaning(text: str, units: Sequence[TextUnit], decision: Semanti
         if spaced and not veto:
             local.append("space_separated_fragment")
         blocked.append(veto or internal)
+        labels.append(label)
+        # 只被“纯标签小标题之后”否决的提名，切点可以上移到标签行之前；
+        # 同时触发其他禁止切规则的位置仍直接否决。
+        label_only.append(label and not (bracket or tail or protecting or relations[index] or continuation))
         ranks.append(None if veto or (internal and not spaced) else
                      2 if feature.boundary_kind == "line" else 1 if feature.boundary_kind == "sentence" else 0)
         reasons.append(local)
@@ -562,9 +609,38 @@ def partition_by_meaning(text: str, units: Sequence[TextUnit], decision: Semanti
                         *(f"before_{block.kind}" for block in structural.get(index, []))])
         evidence[-1].extend(item for block in structural.get(index, []) for item in block.evidence)
     cuts: list[int] = []
+    structural_targets: set[int] = set()
+
+    def shift(index: int, day: bool) -> int | None:
+        """把只因标签行被否决的提名上移到标签行之前；人会让标签随后文，而不是丢掉这个分界。"""
+        if not label_only[index]:
+            return None
+        target = _before_label_lines(features, labels, index)
+        if target is None or blocked[target]:
+            reasons[index].append("shift_before_label_heading_unavailable")
+            return None
+        first_line = _LINES.split(text[units[target + 1].start:], 1)[0]
+        if not _marked_heading(first_line):
+            reasons[index].append("shift_before_label_heading_unmarked")
+            return None
+        reasons[index].append("shifted_before_label_heading")
+        reasons[target].append("selected_before_label_heading")
+        if day:
+            reasons[target].append("selected_day_transition")
+        sources[target].append("shifted_from_label_heading")
+        evidence[target].append(("shifted_from_gap", units[index].end, units[index + 1].start))
+        if target not in cuts:
+            insort(cuts, target)
+        return target
+
     for index in sorted(structural):
         if blocked[index]:
             reasons[index].append("rejected_structure_dependency")
+            day = any(_day_heading(text, block.start) for block in structural[index])
+            if day or decision.gaps[index].depth > config.epsilon:
+                target = shift(index, day)
+                if target is not None:
+                    structural_targets.add(target)
         elif any(_day_heading(text, block.start) for block in structural[index]):
             cuts.append(index)
             reasons[index].append("selected_day_transition")
@@ -577,6 +653,9 @@ def partition_by_meaning(text: str, units: Sequence[TextUnit], decision: Semanti
     for index in sorted(nominated):
         if blocked[index]:
             reasons[index].append("rejected_semantic_dependency")
+            target = shift(index, False)
+            if target is not None and target not in semantic:
+                semantic.append(target)
             continue
         semantic.append(index)
         reasons[index].append("selected_local_semantic")
@@ -588,8 +667,9 @@ def partition_by_meaning(text: str, units: Sequence[TextUnit], decision: Semanti
     for index, reason in merged.items():
         reasons[index].append(reason)
     selected = set(final)
-    semantic = [index for index in semantic if index in selected]
-    structural_selected = tuple(index for index in cuts if index in structural and index in selected)
+    semantic = sorted(index for index in set(semantic) if index in selected)
+    structural_selected = tuple(index for index in cuts
+                                if (index in structural or index in structural_targets) and index in selected)
     lengths = tuple(index for index in lengths if index in selected)
     segments, first = [], 0
     exception_ids: list[int] = []

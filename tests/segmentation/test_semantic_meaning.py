@@ -498,3 +498,38 @@ def test_fragment_merge_never_crosses_a_day_transition_or_the_length_trigger():
     assert [s.raw_text for s in limited.segments] == parts
     assert not any("merged_short_last_segment" in trace.reason_codes for trace in limited.gap_decisions)
     assert_integrity(text, limited, maximum=40)
+
+
+def test_cut_vetoed_only_by_label_heading_moves_before_the_label_and_keeps_day_transition():
+    """标签行之后的提名被否决时上移到标签行之前；换天属性随之保留，不再把第一天粘在前一节。"""
+    parts = ["晚上可以去海边看灯光秀，人非常多。", "⭐️景点必去打卡", "第一天🛵路线：", "琴屿路——小鱼山——栈桥。"]
+    text, result = run(parts, selected=(1,))
+    assert [s.raw_text for s in result.segments] == [parts[0], "\n".join(parts[1:])]
+    assert "shifted_before_label_heading" in result.gap_decisions[1].reason_codes
+    assert {"selected_before_label_heading", "selected_day_transition"} <= set(result.gap_decisions[0].reason_codes)
+    assert result.gap_decisions[0].sources == ("shifted_from_label_heading",)
+    assert result.structural_boundaries == (0,)
+    assert_integrity(text, result)
+
+
+def test_label_shift_respects_vetoes_at_the_target_and_other_vetoes_at_the_origin():
+    """标签行之前若是冒号续接则不移动；原位置另有禁止切理由时也不移动。"""
+    parts = ["推荐路线如下：", "⭐️景点必去打卡", "第一天🛵路线：", "琴屿路——小鱼山——栈桥。"]
+    text, result = run(parts, selected=(1,))
+    assert [s.raw_text for s in result.segments] == [text]
+    assert "shift_before_label_heading_unavailable" in result.gap_decisions[1].reason_codes
+    parts = ["海边的风景很不错。", "交通🅿️", "否则可以坐公交过去。"]
+    text, result = run(parts, selected=(1,))
+    assert [s.raw_text for s in result.segments] == [text]
+    assert "shifted_before_label_heading" not in result.gap_decisions[1].reason_codes
+
+
+@pytest.mark.parametrize("parts", [
+    ["这条街是青春剧《当我飞奔向你》的取景地", "是第4集里放学走过的街道📸️", "梦里的世界大概就长这样🫧"],
+    ["套餐包含以下内容：早餐、晚餐和停车", "-健身房及泳池免费使用👍", "🍴干饭人能量站🍴"],
+])
+def test_label_shift_requires_a_visible_heading_marker(parts):
+    """以普通文字或列表符号开头、只是以 emoji 结尾的行不是题头，不上移，避免切进句子或清单中间。"""
+    text, result = run(parts, selected=(1,))
+    assert all(segment.end != len(parts[0]) for segment in result.segments[:-1])
+    assert not any("selected_before_label_heading" in trace.reason_codes for trace in result.gap_decisions)
