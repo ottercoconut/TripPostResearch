@@ -55,7 +55,9 @@ def test_semantic_single_table_round_trip_and_five_file_verification(prepared):
     ("rule_version", "semantic-depth-ugc-0.1"), ("rule_version", "semantic-depth-ugc-0.2"),
     ("config_sha256", "0" * 64),
     ("model_identity_sha256", "0" * 64), ("trace_filename", "../private.jsonl"),
-    ("trace_sha256", "x" * 64),
+    ("trace_sha256", "x" * 64), ("vector_source", None), ("vector_source", {"mode": "cpu"}),
+    ("vector_source", {"mode": "cache_only", "identity_source_manifest": "run/manifest.json",
+                       "identity_source_manifest_sha256": "a" * 64}),
 ])
 def test_manifest_rejects_development_unknown_and_unbound_identity(prepared, field, value):
     """即使开发清单恰好列出全体成员，也不能冒充完整科研发布。"""

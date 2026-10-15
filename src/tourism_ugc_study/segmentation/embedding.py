@@ -379,3 +379,45 @@ class QwenEmbeddingProvider(QwenTokenCounter):
                 normalized = functional.normalize(pooled, p=2, dim=1)
                 output.append(normalized.cpu().numpy().copy())
         return validate_vectors(np.concatenate(output, axis=0), count=len(values), dimension=dimension)
+
+
+class CacheOnlyProvider(QwenTokenCounter):
+    """沿用既有正式运行的模型身份，只在 CPU 上加载 tokenizer，不加载权重。
+
+    用于“规则变化而候选单元不变”的重算：向量全部来自同一身份的只读缓存，
+    本类不能推理，encode 一律失败，缺向量由只读缓存报错而不是静默重算。
+    tokenizer 决定单元边界和长度，因此其资产摘要、原生规范化及依赖版本必须
+    与记录身份逐项一致；不一致即拒绝，不能用别的 tokenizer 冒充同一身份。
+    identity 对外即记录身份（含原 CUDA 设备 UUID），使缓存命名空间与谱系不变。
+    """
+
+    _TOKENIZER_FIELDS = ("provider", "model_id", "model_revision", "tokenizer_revision", "dimension",
+                         "instruction", "template", "special_tokens", "eos_token_id", "pad_token_id",
+                         "padding_side", "max_input_tokens", "truncation", "native_normalizer", "offset_policy")
+
+    def __init__(self, *, recorded_identity: dict[str, Any], local_files_only: bool = True,
+                 cache_dir: str | None = None) -> None:
+        if not isinstance(recorded_identity, dict):
+            raise EmbeddingError("cache_only_identity_invalid")
+        try:
+            super().__init__(model_id=recorded_identity["model_id"], revision=recorded_identity["model_revision"],
+                             max_input_tokens=recorded_identity["max_input_tokens"],
+                             instruction=recorded_identity["instruction"],
+                             local_files_only=local_files_only, cache_dir=cache_dir)
+        except KeyError:
+            raise EmbeddingError("cache_only_identity_invalid") from None
+        observed = self.identity
+        recorded_assets = recorded_identity.get("assets_sha256")
+        recorded_dependencies = recorded_identity.get("dependencies")
+        if (any(observed[key] != recorded_identity.get(key) for key in self._TOKENIZER_FIELDS)
+                or not isinstance(recorded_assets, dict) or not isinstance(recorded_dependencies, dict)
+                or any(recorded_assets.get(name) != digest for name, digest in observed["assets_sha256"].items())
+                or any(recorded_dependencies.get(name) != version
+                       for name, version in observed["dependencies"].items())):
+            raise EmbeddingError("cache_only_tokenizer_identity_mismatch")
+        self.identity = json.loads(json.dumps(recorded_identity, allow_nan=False))
+        self.model_call_count = 0
+
+    def encode(self, texts: Sequence[str]) -> np.ndarray:
+        """只读缓存模式没有模型；任何推理请求都是编排错误。"""
+        raise EmbeddingError("cache_only_inference_forbidden")

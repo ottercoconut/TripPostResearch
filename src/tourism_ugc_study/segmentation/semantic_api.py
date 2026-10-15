@@ -1,6 +1,7 @@
 """组合正文投影、候选单元、向量和纯边界计算的显式语义接口。
 
 调用者负责初始化provider与缓存；本接口不打开数据库、不下载权重。
+只读缓存时向量全部来自缓存，provider只提供身份与token计数。
 逐帖投影／单元／边界失败带明确原因且无部分片段；模型或缓存异常向上抛出，
 使批处理停止系统性故障。
 """
@@ -97,7 +98,13 @@ def segment_body_semantic(
             if len(units) >= 2:
                 texts = [source[u.start:u.end] for u in units]
                 # 模型和cache错误必须向上终止attempt，不能混作可继续的单帖错误。
-                vectors = cache.encode(texts, provider) if cache else provider.encode(texts)
+                # 只读缓存只取已有向量，缺条目即失败，绝不回落到provider推理。
+                if cache is None:
+                    vectors = provider.encode(texts)
+                elif cache.readonly:
+                    vectors = cache.read_cached(texts)
+                else:
+                    vectors = cache.encode(texts, provider)
                 vectors = validate_vectors(vectors, count=len(units), dimension=provider.identity["dimension"])
                 vector_hash = hashlib.sha256(vectors.astype("<f4").tobytes(order="C")).hexdigest()
                 embedded_count = len(units)
