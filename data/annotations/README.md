@@ -1,11 +1,13 @@
 # 人工标注数据
 
-> **研究内容标签模板状态**：`CURRENT_ALIGNED`
+> **V4操作边界（2026年10月17日）**：编码规范已增加旅游购品；本轮仅同步长表填写说明，未改旧Excel、任务生成器、网站或既有答案。实际新任务须核对字段、导出和复核逻辑均包含`rs_r_gds`；后续核验统一见总备忘录B07／B06。
+
+> **研究内容标签模板状态**：通用长表`CURRENT_ALIGNED`；平台字段枚举与历史宽表`NEEDS_UPDATE / NOT_VERIFIED`
 > **labels.csv契约版本**：`labels-v3.0`
 > **共同校准主表契约版本**：`calibration-coding-v2.0`
-> **当前对齐编码表**：`v3.20.0`
-> **对齐说明**：v3.19.x—v3.20.0未改字段名与长表列，`labels.csv`无需改动；v3.20.0的主导评价规则只体现在`label_value`的填写方式上。
-> **更新日期**：2026年9月28日
+> **当前对齐编码表**：`v3.21.0`（仅通用长表契约）
+> **对齐说明**：v3.21.0新增`dimension_code=V4`、`field_name=rs_r_gds`、`label_value=0/1`。`labels.csv`与共同校准主表均无内嵌字段枚举，继续使用原有列结构；字段定义、疑问与证据要求以编码表为准。旧记录缺列不得自动补0，版本只能填写该轮实际采用的规则。
+> **更新日期**：2026年10月17日
 > **操作文件边界**：上述对齐仅指无内嵌枚举的`labels.csv`通用长表；V0身份轨现为`PAUSED`，现有作者协议、模板和工作簿只作追溯，不得发放、改签或用于身份裁决。
 
 人工标注采用“编码簿—抽样轮次—独立标注—仲裁—冻结发布”流程。
@@ -71,7 +73,7 @@
 | `review_notes_json` | 标记疑问时必填，结构为`{"reason_code":"BOUNDARY","alternative_values":[0,1],"note":"简短说明"}`；允许的原因代码以编码表第5.4.2节为准 |
 | `evidence_spans_json` | 文本证据使用编码表第5.4.3节的`fields/start/end/quote`数组；`raw_text[start:end]`必须等于`quote`。帖子级和图像级记录留空 |
 | `template_schema_version` | 当前固定填写`labels-v3.0` |
-| `codebook_version` | 填写轮次实际采用且已完成操作对齐的编码表版本，并与manifest一致；当前最高标准v3.18.0不能自动改签旧轮次 |
+| `codebook_version` | 填写轮次实际采用且已完成操作对齐的编码表版本，并与manifest一致；当前最高标准v3.21.0不能自动改签旧轮次 |
 | `annotated_at` | ISO 8601时间戳；同一轮次统一时区 |
 
 `labels.csv`只保存研究变量的原子判断，不保存开放代码、候选主题或主题分析结果。框架遗漏、边界案例、反例和切分问题由转换工具及研究负责人整理到`calibration-issues.csv`，不得自造`label_value`。
