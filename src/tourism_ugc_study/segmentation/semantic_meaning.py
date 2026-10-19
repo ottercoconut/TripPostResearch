@@ -1,17 +1,19 @@
-"""分层意思分区核心：规则决定禁止切与必须切，语义模型只在灰色地带选择。
+"""分层意思分区核心：规则决定禁止切与必须切，语义模型只在普通边界上选择。
 
 本模块仅做纯计算；不访问文件、数据库、帖子身份、模型或向量缓存，不新增
 单元或伪造 embedding。调用者先用原有评分函数生成 SemanticDecision；窗口
-和阈值由调用者明确保存。优先级为：禁止切＞换天必切＞长度兜底＞灰色地带。
-句号、属性变化本身不会触发切分；小标题只在语义曲线有下降时切开。最后一步
-只合并碎段：无文字的片段和过短的首末段并入相邻段。运行结果仍须抽查，不能
-自动证明所有片段均符合人的切分直觉。无法在既有 gap 上表达的意思转换保留
-为限制，不能移动到句内相邻位置代替。
+和阈值由调用者明确保存。1.3（适配方案§5.2.3）的优先级为：禁止切＞换天与
+独立小节必切＞长度兜底＞普通边界。普通边界只来自过深度门槛的语义谷值，
+且须前文已完成、不在同栏目清单内部；句号、换行、编号、题头形态或属性变化
+本身都不触发切分。最后只撤销切点：无文字碎段、过短首末段、只有题头的片段
+及独立小节前单独剩下的收束句并入相邻段。运行结果仍须抽查，不能自动证明
+所有片段均符合人的切分直觉。无法在既有 gap 上表达的意思转换保留为限制，
+不能移动到句内相邻位置代替。
 """
 
 from __future__ import annotations
 
-from bisect import insort
+from bisect import bisect_right, insort
 from dataclasses import asdict, dataclass
 from math import isfinite
 import re
@@ -22,21 +24,23 @@ from .contracts import SemanticDecision, TextSegment, TextUnit, TokenCounter
 from .integrity import WHITE, validate
 from .semantic_config import CoherentSemanticConfig
 from .semantic_coherence import discover_coherent_blocks
-from .semantic_relations import analyze_gap_relations
+from .semantic_relations import analyze_gap_continuations, analyze_gap_relations
+from .semantic_sections import (
+    XHS_EMOJI_CODE, SectionCandidate, SectionLine, count_sentences, discover_sections,
+    first_complete_end, metadata_text, separator_text,
+)
 from .semantic_structure import (
     StructureBlock, analyze_gap_structure, discover_context_blocks,
     discover_structure_blocks,
 )
 
-EXPERIMENT_ID = "meaning-layers-2"
+EXPERIMENT_ID = "meaning-layers-3"
 _LINES = re.compile(r"\r\n|[\r\n\u2028\u2029]")
 _DAY = re.compile(r"(?:day\s*\d+|d\s*\d+|第[0-9一二三四五六七八九十百]+天)(?![0-9])", re.I)
 _DATE = re.compile(r"(?:\d{2,4}年)?\d{1,2}月\d{1,2}日")
 _ATTRIBUTE = re.compile(r"^(?:交通|地址|位置|导航|时间|时长|开放时间|营业时间|门票|票价|价格|费用|预约|停车|电话|优点|缺点|亮点)\s*[:：|｜]")
 _NUMBER = re.compile(r"^(?:\d+[、．.）)]|[一二三四五六七八九十百]+[、．.]|[（(][一二三四五六七八九十百\d]+[）)])")
 _STRONG = frozenset("。！？!?；;")
-_PAIRS = {"(": ")", "（": "）", "[": "]", "【": "】", "{": "}", "「": "」", "『": "』", "“": "”", "‘": "’", "《": "》"}
-_CLOSERS = frozenset("”’」』)）】]》〉\"'")
 
 
 @dataclass(frozen=True)
@@ -115,17 +119,20 @@ def _lines(text: str) -> tuple[_Line, ...]:
 
 
 def _plain(value: str) -> str:
-    """只在识别副本上去行首装饰，绝不将此副本用作输出正文。"""
+    """只在识别副本上去行首装饰，绝不将此副本用作输出正文。
+
+    1.3起小红书表情代码（如“[三R]”）整体视为行首装饰，否则“[三R]第三天”
+    这类日程题头会因代码中的文字而认不出。
+    """
     cursor = 0
-    while cursor < len(value) and (value[cursor] in WHITE or unicodedata.category(value[cursor])[0] in {"S", "P", "M"}):
-        cursor += 1
+    while cursor < len(value):
+        if code := XHS_EMOJI_CODE.match(value, cursor):
+            cursor = code.end()
+        elif value[cursor] in WHITE or unicodedata.category(value[cursor])[0] in {"S", "P", "M"}:
+            cursor += 1
+        else:
+            break
     return value[cursor:]
-
-
-def _metadata(value: str) -> bool:
-    """整段纯标签、账号、链接或装饰才是元数据，不吞正文里的话题词。"""
-    stripped = re.sub(r"https?://\S+|#[^\s#]+#?|@\S+", "", value)
-    return bool(value.strip()) and not any(unicodedata.category(c)[0] in {"L", "N"} for c in stripped)
 
 
 def _trailing_schedule_start(value: str) -> int | None:
@@ -151,7 +158,7 @@ def _heading(value: str) -> _Heading | None:
     本启发式不读取对象名词表，也不声称解决完整中文句法或标题层级。
     """
     plain = _plain(value)
-    if not plain or _metadata(value) or _ATTRIBUTE.match(plain):
+    if not plain or metadata_text(value) or _ATTRIBUTE.match(plain):
         return None
     trailing_start = _trailing_schedule_start(value)
     if trailing_start is not None:
@@ -178,29 +185,6 @@ def _heading(value: str) -> _Heading | None:
     return _Heading("explicit_heading" if explicit else "unmarked_heading", explicit)
 
 
-def _first_complete_end(text: str, start: int, end: int) -> int:
-    """取首个括号外完整句；没有强句末时完整保留该原文行，不按逗号拆。
-
-    极短但完整说明可成为首说明，不为了累计字符跨下一明确题头。
-    闭符和组合符附着在句末，保护区间端点不会落入其组合字素内部。
-    """
-    stack: list[str] = []
-    cursor = start
-    while cursor < end:
-        char = text[cursor]
-        if char in _PAIRS:
-            stack.append(_PAIRS[char])
-        elif stack and char == stack[-1]:
-            stack.pop()
-        elif char in _STRONG and not stack:
-            cursor += 1
-            while cursor < end and (text[cursor] in _CLOSERS or unicodedata.category(text[cursor]).startswith("M")):
-                cursor += 1
-            return cursor
-        cursor += 1
-    return end
-
-
 def _trailing_metadata_block(text: str, lines: Sequence[_Line]) -> StructureBlock | None:
     """将连续纯元数据尾行绑定到前一实质行的最后一句，坐标始终取原文。
 
@@ -209,14 +193,14 @@ def _trailing_metadata_block(text: str, lines: Sequence[_Line]) -> StructureBloc
     全文只有元数据时没有可依附的正文，返回 None，不虚构实质句证据。
     """
     before = len(lines) - 1
-    while before >= 0 and _metadata(text[lines[before].start:lines[before].end]):
+    while before >= 0 and metadata_text(text[lines[before].start:lines[before].end]):
         before -= 1
     if before < 0 or before == len(lines) - 1:
         return None
     line = lines[before]
     cursor, prior = line.start, None
     while cursor < line.end:
-        stop = _first_complete_end(text, cursor, line.end)
+        stop = first_complete_end(text, cursor, line.end)
         if any(unicodedata.category(c)[0] in {"L", "N"} for c in text[cursor:stop]):
             prior = cursor, stop
         cursor = stop
@@ -258,7 +242,7 @@ def _meaning_blocks(text: str, units: Sequence[TextUnit]) -> tuple[StructureBloc
             evidence.extend(item for item in repeated[line.start].evidence if item[0] in {"repeated_marker", "matching_marker"})
         # 同行日程本身带完整叙述时，首句已经足够，不再绑定下一原文行。
         if heading.kind == "schedule_heading" and any(c in _STRONG for c in value):
-            stop = _first_complete_end(text, line.start, line.end)
+            stop = first_complete_end(text, line.start, line.end)
             output.append(StructureBlock(line.start, stop, kind, (*evidence, ("first_substantive_sentence", line.start, stop))))
             continue
         if index + 1 == len(lines):
@@ -288,11 +272,11 @@ def _meaning_blocks(text: str, units: Sequence[TextUnit]) -> tuple[StructureBloc
                 body_index += 1
         body = lines[body_index]
         body_value = text[body.start:body.end]
-        if _metadata(body_value):
+        if metadata_text(body_value):
             continue
         if not heading.explicit and (len(body_value) < 24 or len(body_value) <= len(value)):
             continue
-        stop = _first_complete_end(text, body.start, body.end)
+        stop = first_complete_end(text, body.start, body.end)
         output.append(StructureBlock(heading_start, stop, kind, (*evidence, ("first_substantive_sentence", body.start, stop))))
     return tuple(sorted(set(output), key=lambda block: (block.start, block.end, block.kind)))
 
@@ -353,6 +337,10 @@ def _label_heading_line(text: str, end: int) -> bool:
     heading = _heading(line)
     if heading is None:
         return False
+    # 日程识别只看行首“第X天／DayN”，同行接着写叙述（带逗号或句末标点）时整行
+    # 是当天正文，不是纯标签；否则“第一天我们……。”之后的换天切点会被误否决（1.3修正）。
+    if heading.kind == "schedule_heading" and any(c in "，,。！？!?；;" for c in line):
+        return False
     # “交通🅿️”“美食🍽️”以行尾装饰标示题头，与行首装饰同等视为明确标签。
     core = line.rstrip()
     while core and (core[-1] in WHITE or core[-1] == "\ufe0f" or unicodedata.category(core[-1])[0] in {"S", "M"}):
@@ -361,6 +349,22 @@ def _label_heading_line(text: str, end: int) -> bool:
     if not (heading.explicit or heading.kind == "trailing_schedule_heading" or decorated):
         return False
     return not re.search(r"[:：]\s*\S", _plain(line))
+
+
+def _label_above_separator(text: str, end: int) -> bool:
+    """以 end 结束的行是分隔线（如“━━━━”），且其上一条非空行是纯标签小标题。
+
+    这种“题头＋分隔线”之后的普通切点应上移到题头之前（1.3），使题头不挂在上一节
+    末尾；它不是禁止切证据，不否决独立小节或换天必切。
+    """
+    starts = [match.end() for match in _LINES.finditer(text, 0, end)]
+    start = starts[-1] if starts else 0
+    if not separator_text(text[start:end]):
+        return False
+    previous = start - 1
+    while previous > 0 and text[previous - 1] in WHITE:
+        previous -= 1
+    return previous > 0 and _label_heading_line(text, previous)
 
 
 def _length_partition(text: str, units: Sequence[TextUnit], decision: SemanticDecision,
@@ -416,17 +420,56 @@ def _wordless(value: str) -> bool:
     return not any(char.isalnum() and char not in _FILLERS for char in value)
 
 
+def _rows(value: str) -> list[str]:
+    """片段内去除两端空白后的非空行，仅供版式判断，不作输出正文。"""
+    return [row for row in (part.strip("".join(WHITE)) for part in _LINES.split(value)) if row]
+
+
+def _title_row(row: str) -> bool:
+    """该行是题头形态且不含句子标点；“第二天：早上……。”这类带叙述的日程行不算。"""
+    return _heading(row) is not None and not any(c in row for c in "，,。！？!?；;")
+
+
+def _heading_only(value: str) -> bool:
+    """片段像一个题头组：至多三行，均为题头形态或纯元数据，且至少一行题头。
+
+    行数上限与题头组定义一致（题头加至多两行副题／栏目短行），避免把短行
+    密集的整段正文当成题头。
+    """
+    rows = _rows(value)
+    headings = [_title_row(row) for row in rows]
+    return (0 < len(rows) <= 3 and any(headings)
+            and all(heading or metadata_text(row) for heading, row in zip(headings, rows)))
+
+
+def _closing_sentence(value: str) -> bool:
+    """片段是一句普通叙述：不以符号、括号或编号开头，不是题头或“标签：内容”字段。
+
+    收束语留在前节的前提是它本身只是叙述；单独成行的“✅路线：……”之类是另一个
+    条目，不当作上一节的收束语合并。
+    """
+    rows = _rows(value)
+    if not rows:
+        return False
+    first = rows[0]
+    if _heading(first) is not None or _NUMBER.match(first) or re.match(r"^[^，,。！？!?；;]{1,12}[:：]", first):
+        return False
+    return unicodedata.category(first[0])[0] in {"L", "N"} and first[0] not in "【[〖"
+
+
 def _merge_fragments(text: str, units: Sequence[TextUnit], cuts: Sequence[int], locked: set[int],
-                     config: CoherentSemanticConfig, counter: TokenCounter,
+                     sections: set[int], config: CoherentSemanticConfig, counter: TokenCounter,
                      ) -> tuple[tuple[int, ...], dict[int, str]]:
     """撤销会留下不像人切的碎段的切点，返回保留切点与“撤销切点→原因”。
 
-    两条规则，按顺序执行：没有任何文字的片段（单个 emoji、箭头、分隔线、
-    零宽字符）并入前段，位于开头时并入后段；首段、末段非空白字符不足
-    edge_segment_nonspace_chars 时分别并入后段、前段。正文中间的短段不处理，
-    因为小标题和单句感受常是真正的意思单位。locked 中的换天切点从不撤销；
-    合并后超过 max_segment_tokens 的也不撤销，因此长度兜底切点与长度异常
-    片段保持不变。只删切点、不新增或移动切点。
+    四条规则，按顺序执行：①没有任何文字的片段（单个 emoji、箭头、分隔线、
+    零宽字符）并入前段，位于开头时并入后段；②首段、末段非空白字符不足
+    edge_segment_nonspace_chars 时分别并入后段、前段；③（1.3）只有题头、没有
+    任何说明的片段并入后段，题头随后文；④（1.3）普通切点与随后的独立小节
+    必切之间只剩一个完整句时，撤销该普通切点，收束句留在前节。正文中间有
+    说明的短段不处理。locked 中的换天与独立小节切点从不撤销；合并后超过
+    max_segment_tokens 的也不撤销，因此长度兜底切点与长度异常片段保持不变。
+    sections 是已选独立小节切点。只删切点、不新增或移动切点。
     """
     kept = sorted(cuts)
     merged: dict[int, str] = {}
@@ -463,6 +506,23 @@ def _merge_fragments(text: str, units: Sequence[TextUnit], cuts: Sequence[int], 
         remove(0, "merged_short_first_segment")
     if kept and sum(char not in WHITE for char in segment(len(kept))) < limit:
         remove(len(kept) - 1, "merged_short_last_segment")
+    position = 0
+    while position < len(kept):
+        # 只在后段以正文开头时并入，题头才是在引出后文；并入后当前片段已含说明。
+        following = _rows(segment(position + 1))
+        if not (_heading_only(segment(position)) and following and not _title_row(following[0])
+                and remove(position, "merged_heading_only_segment")):
+            position += 1
+    # 每个独立小节最多撤销其前一个普通切点一次；合并后的较长片段不再连锁并入。
+    handled: set[int] = set()
+    for position in range(len(kept) - 2, -1, -1):
+        if kept[position + 1] not in sections or kept[position + 1] in handled:
+            continue
+        handled.add(kept[position + 1])
+        bounds = (-1, *kept, len(units) - 1)
+        start, end = units[bounds[position + 1] + 1].start, units[bounds[position + 2]].end
+        if count_sentences(text, start, end) <= 1 and _closing_sentence(text[start:end]):
+            remove(position, "merged_section_closure")
     return tuple(kept), merged
 
 
@@ -509,37 +569,94 @@ def _before_label_lines(features: Sequence, labels: Sequence[bool], index: int) 
 _COHERENT_KINDS = frozenset({"coherent_enumeration", "coherent_schedule", "coherent_directory", "coherent_item"})
 
 
+def _sibling_groups(lines: Sequence[_Line], repeated: Sequence[StructureBlock]) -> tuple[frozenset[int], ...]:
+    """把重复条目块按标记互指关系连成同形条目序列，元素为行号。
+
+    discover_structure_blocks 的每个 repeated_entry 证据含自身标记及同族另一条目
+    的标记；按互指关系合并即得同族全部条目。只以码点区间定位所在行，不重新
+    识别版式；找不到所在行的标记忽略。
+    """
+    starts = [line.start for line in lines]
+    parent: dict[int, int] = {}
+
+    def line_of(position: int) -> int | None:
+        """标记起点所在的非空行号。"""
+        index = bisect_right(starts, position) - 1
+        return index if index >= 0 and lines[index].start <= position < lines[index].end else None
+
+    def root(item: int) -> int:
+        """并查集根节点，带路径压缩。"""
+        while parent.setdefault(item, item) != item:
+            parent[item] = parent[parent[item]]
+            item = parent[item]
+        return item
+
+    for block in repeated:
+        marks = {kind: line_of(start) for kind, start, _ in block.evidence if kind in {"repeated_marker", "matching_marker"}}
+        own, other = marks.get("repeated_marker"), marks.get("matching_marker")
+        if own is not None and other is not None:
+            parent[root(own)] = root(other)
+    groups: dict[int, set[int]] = {}
+    for item in list(parent):
+        groups.setdefault(root(item), set()).add(item)
+    return tuple(frozenset(group) for group in groups.values() if len(group) >= 2)
+
+
+def _section_candidates(text: str, units: Sequence[TextUnit]) -> tuple[SectionCandidate, ...]:
+    """以本模块的题头识别和重复条目证据，交给 semantic_sections 做小节确认。"""
+    lines = _lines(text)
+    section_lines = tuple(SectionLine(line.start, line.end, heading.kind if heading else None)
+                          for line in lines for heading in (_heading(text[line.start:line.end]),))
+    repeated = [block for block in discover_structure_blocks(text, units) if block.kind == "repeated_entry"]
+    return discover_sections(text, section_lines, _sibling_groups(lines, repeated))
+
+
 def partition_by_meaning(text: str, units: Sequence[TextUnit], decision: SemanticDecision,
                          config: CoherentSemanticConfig, counter: TokenCounter) -> MeaningPartition:
-    """按“禁止切＞换天必切＞长度兜底＞灰色地带”的优先级选择最终切点。
+    """按“禁止切＞换天与独立小节必切＞长度兜底＞普通边界”选择最终切点（1.3）。
 
     禁止切（一票否决，长度也不能推翻）：句内续接、同一行内的配对括号、题头与
-    首说明、纯标签小标题之后、尾部标签（含句末同行的标签），以及
-    semantic_relations 识别的强依赖词、未完结条件和括号说明。唯一例外是只被
-    “纯标签小标题之后”否决的提名：若标签行以题头标记开头（emoji、编号、
-    方括号等），标签应随后文，故切点上移到标签行之前（若该处允许切），
-    换天属性随之保留，而不是直接丢弃这个分界。
-    句内位置不供语义或小标题选择；无标点长文中以空白分隔的位置只作为长度
-    兜底的最后手段。
-    换天必切：叙述中的日程题头只要未被禁止即切开。灰色地带：其余结构提名
-    （小标题、连贯块起点）只在该处语义曲线有下降（depth>epsilon）时切开；
-    语义谷值按深度门槛提名后直接采纳，不设全局最短段门槛。连贯块（完整介绍、
-    组成列表、同日推荐）只作证据保存，不再阻止切分。所有切点定下后，再由
-    _merge_fragments 撤销留下无文字碎段或过短首末段的切点（换天切点除外）。结构跨度没有准确已有
-    gap 时记录 unavailable，不创造单元。N=0/1仍检验原文和实际token；异常
-    抛 ValueError，不返回半帖。
+    首说明、独立小节题头组及其首说明、纯标签小标题之后、尾部标签（含句末同行
+    的标签），以及 semantic_relations 识别的强依赖词、未完结条件和括号说明。
+    必切：叙述换天题头，以及 semantic_sections 确认的独立小节题头组之前；二者
+    不要求语义曲线下降，碎段合并也不撤销。普通边界只来自过深度门槛（或绝对
+    连贯度门槛）的语义谷值，并须满足：未被禁止切否决、后句不以对比／解释词
+    开头、不在同栏目清单等连贯块内部。小标题、编号条目等结构形态本身不再
+    放宽门槛。唯一的移动是只被“纯标签小标题之后”否决的普通边界：若标签行以
+    题头标记开头，切点上移到标签行之前（目标处同样须通过上述检查）。长度兜底
+    只处理超限；最后由 _merge_fragments 撤销碎段、题头孤段和小节前收束句的切点。
+    结构跨度没有准确已有 gap 时记录 unavailable，不创造单元。N=0/1仍检验原文和
+    实际token；异常抛 ValueError，不返回半帖。
     """
     _validate_input(text, units, decision, config, counter)
     features = analyze_gap_structure(text, units)
     relations = analyze_gap_relations(text, units)
+    contrasts = analyze_gap_continuations(text, units)
     coherent = discover_coherent_blocks(text, units)
-    blocks = tuple(sorted(set((*_meaning_blocks(text, units), *coherent)),
-                          key=lambda block: (block.start, block.end, block.kind)))
     starts = {unit.start: index - 1 for index, unit in enumerate(units) if index}
-    structural: dict[int, list[StructureBlock]] = {}
     unavailable: list[tuple[str, int, int]] = []
+    section_gaps: dict[int, SectionCandidate] = {}
+    candidate_gaps: dict[int, SectionCandidate] = {}
+    section_blocks: list[StructureBlock] = []
+    for candidate in _section_candidates(text, units):
+        gap = starts.get(candidate.start)
+        if candidate.protected:
+            # 题头组与首个完整说明之间禁止切，题头不能挂在上一节末尾或单独成段。
+            section_blocks.append(StructureBlock(candidate.start, max(candidate.first_end, candidate.group_end),
+                                                 "section_heading", candidate.evidence))
+        if not candidate.confirmed:
+            if gap is not None:
+                candidate_gaps[gap] = candidate
+        elif gap is None:
+            unavailable.append(("section_heading", candidate.start, candidate.group_end))
+        else:
+            section_gaps[gap] = candidate
+    blocks = tuple(sorted(set((*_meaning_blocks(text, units), *coherent, *section_blocks)),
+                          key=lambda block: (block.start, block.end, block.kind)))
+    structural: dict[int, list[StructureBlock]] = {}
     for block in blocks:
-        if block.kind in {"trailing_metadata_context", "syntactic_continuation"} or block.start == (units[0].start if units else 0):
+        if (block.kind in {"trailing_metadata_context", "syntactic_continuation", "section_heading"}
+                or block.start == (units[0].start if units else 0)):
             continue
         gap = starts.get(block.start)
         if gap is None:
@@ -549,17 +666,19 @@ def partition_by_meaning(text: str, units: Sequence[TextUnit], decision: Semanti
     # 句末同行的尾部标签（如“……。 #话题#”）不成整行，行级尾标签识别看不到；
     # 末尾连续的纯标签／账号／链接单元一律附着前文，与 A 层尾标签规则一致。
     meta_tail = len(units)
-    while meta_tail > 1 and _metadata(text[units[meta_tail - 1].start:units[meta_tail - 1].end]):
+    while meta_tail > 1 and metadata_text(text[units[meta_tail - 1].start:units[meta_tail - 1].end]):
         meta_tail -= 1
-    blocked, ranks, reasons, evidence, sources, labels, label_only = [], [], [], [], [], [], []
+    blocked, ranks, reasons, evidence, sources, labels, label_only, in_list = [], [], [], [], [], [], [], []
+    after_separator: list[bool] = []
     original = set(decision.semantic_boundaries)
     absolute = {index for index, feature in enumerate(features)
                 if feature.natural_boundary and decision.gaps[index].cohesion <= config.absolute_cohesion_threshold}
     nominated = original | absolute
     for index, feature in enumerate(features):
         active = [block for block in blocks if block.start < units[index].end < block.end]
-        # 连贯块只留作证据；真正否决切分的是题头附着、尾标签和句法续接。
+        # 连贯块不否决切分，只让普通边界不选；真正否决的是题头附着、尾标签和句法续接。
         protecting = [block for block in active if block.kind not in _COHERENT_KINDS]
+        in_list.append(len(protecting) < len(active))
         local = list(feature.reasons)
         local.extend(f"inside_{block.kind}" for block in active)
         local.extend(relations[index])
@@ -573,6 +692,9 @@ def partition_by_meaning(text: str, units: Sequence[TextUnit], decision: Semanti
         label = feature.boundary_kind == "line" and _label_heading_line(text, units[index].end)
         if label:
             local.append("after_label_heading")
+        separated = feature.boundary_kind == "line" and not label and _label_above_separator(text, units[index].end)
+        if separated:
+            local.append("after_label_heading_separator")
         tail = index + 1 >= meta_tail
         if tail:
             local.append("before_trailing_metadata")
@@ -592,10 +714,12 @@ def partition_by_meaning(text: str, units: Sequence[TextUnit], decision: Semanti
         if spaced and not veto:
             local.append("space_separated_fragment")
         blocked.append(veto or internal)
-        labels.append(label)
+        labels.append(label or separated)
+        after_separator.append(separated and not veto)
         # 只被“纯标签小标题之后”否决的提名，切点可以上移到标签行之前；
         # 同时触发其他禁止切规则的位置仍直接否决。
-        label_only.append(label and not (bracket or tail or protecting or relations[index] or continuation))
+        label_only.append((label or separated)
+                          and not (bracket or tail or protecting or relations[index] or continuation))
         ranks.append(None if veto or (internal and not spaced) else
                      2 if feature.boundary_kind == "line" else 1 if feature.boundary_kind == "sentence" else 0)
         reasons.append(local)
@@ -606,10 +730,23 @@ def partition_by_meaning(text: str, units: Sequence[TextUnit], decision: Semanti
             evidence[-1].append(("punctuation_continuation", suffix - 1, suffix))
         sources.append([*( ["local_semantic"] if index in original else []),
                         *( ["natural_absolute_cohesion"] if index in absolute else []),
-                        *(f"before_{block.kind}" for block in structural.get(index, []))])
+                        *(f"before_{block.kind}" for block in structural.get(index, [])),
+                        *( ["before_section_heading"] if index in section_gaps else [])])
         evidence[-1].extend(item for block in structural.get(index, []) for item in block.evidence)
+        if index in section_gaps or index in candidate_gaps:
+            evidence[-1].extend((section_gaps.get(index) or candidate_gaps[index]).evidence)
     cuts: list[int] = []
     structural_targets: set[int] = set()
+
+    def ordinary(index: int) -> bool:
+        """普通边界的附加条件：后句不以对比／解释词开头，且不在连贯块内部。"""
+        if contrasts[index]:
+            reasons[index].append("rejected_open_contrast_or_reason")
+            return False
+        if in_list[index]:
+            reasons[index].append("rejected_inside_coherent_block")
+            return False
+        return True
 
     def shift(index: int, day: bool) -> int | None:
         """把只因标签行被否决的提名上移到标签行之前；人会让标签随后文，而不是丢掉这个分界。"""
@@ -623,6 +760,9 @@ def partition_by_meaning(text: str, units: Sequence[TextUnit], decision: Semanti
         if not _marked_heading(first_line):
             reasons[index].append("shift_before_label_heading_unmarked")
             return None
+        if not day and target not in cuts and not ordinary(target):
+            reasons[index].append("shift_before_label_heading_rejected")
+            return None
         reasons[index].append("shifted_before_label_heading")
         reasons[target].append("selected_before_label_heading")
         if day:
@@ -633,23 +773,31 @@ def partition_by_meaning(text: str, units: Sequence[TextUnit], decision: Semanti
             insort(cuts, target)
         return target
 
+    for index, candidate in candidate_gaps.items():
+        reasons[index].append(candidate.reason)
+    for index in sorted(section_gaps):
+        if blocked[index]:
+            reasons[index].append("rejected_section_dependency")
+            continue
+        insort(cuts, index)
+        structural_targets.add(index)
+        reasons[index].append("selected_section_heading")
     for index in sorted(structural):
         if blocked[index]:
             reasons[index].append("rejected_structure_dependency")
-            day = any(_day_heading(text, block.start) for block in structural[index])
-            if day or decision.gaps[index].depth > config.epsilon:
-                target = shift(index, day)
+            if any(_day_heading(text, block.start) for block in structural[index]):
+                target = shift(index, True)
                 if target is not None:
                     structural_targets.add(target)
         elif any(_day_heading(text, block.start) for block in structural[index]):
-            cuts.append(index)
+            if index not in cuts:
+                insort(cuts, index)
             reasons[index].append("selected_day_transition")
-        elif decision.gaps[index].depth > config.epsilon:
-            cuts.append(index)
-            reasons[index].append("selected_structure_with_semantic_dip")
-        else:
-            reasons[index].append("rejected_structure_without_semantic_dip")
+        elif index not in nominated and index not in section_gaps:
+            # 1.3取消“小标题处语义略降即切”：结构形态须同时是过门槛的语义谷值。
+            reasons[index].append("rejected_structure_below_valley")
     semantic: list[int] = []
+    mandatory = set(cuts)
     for index in sorted(nominated):
         if blocked[index]:
             reasons[index].append("rejected_semantic_dependency")
@@ -657,13 +805,23 @@ def partition_by_meaning(text: str, units: Sequence[TextUnit], decision: Semanti
             if target is not None and target not in semantic:
                 semantic.append(target)
             continue
+        if index not in mandatory and not ordinary(index):
+            continue
+        # “题头＋分隔线”之后的普通切点上移到题头之前；上移不成时保留原位。
+        if index not in mandatory and after_separator[index]:
+            target = shift(index, False)
+            if target is not None:
+                if target not in semantic:
+                    semantic.append(target)
+                continue
         semantic.append(index)
         reasons[index].append("selected_local_semantic")
         if index not in cuts:
             insort(cuts, index)
     lengths, exception_spans = _length_partition(text, units, decision, config, counter, cuts, ranks)
-    locked = {index for index in cuts if "selected_day_transition" in reasons[index]}
-    final, merged = _merge_fragments(text, units, (*cuts, *lengths), locked, config, counter)
+    sections = {index for index in section_gaps if "selected_section_heading" in reasons[index]}
+    locked = sections | {index for index in cuts if "selected_day_transition" in reasons[index]}
+    final, merged = _merge_fragments(text, units, (*cuts, *lengths), locked, sections, config, counter)
     for index, reason in merged.items():
         reasons[index].append(reason)
     selected = set(final)

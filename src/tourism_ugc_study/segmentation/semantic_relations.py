@@ -5,6 +5,10 @@
 结论的条件（A3）、后句是附着上一条的括号说明（A5）。识别只依赖显式
 词面与标点，隐含比较或跨多句的条件仍无法覆盖，属于已知限制。输出与
 gap 一一对应；无关系的 gap 返回空元组，不表示该处应当切开。
+
+另有一类较弱的证据（1.3起）：后句以对比或解释前文的词开头，说明前一叙述
+尚未完成。它不进入禁止切，只供分区器在普通边界上不选该处；换天、独立小节
+必切和长度兜底不受影响。
 """
 
 from __future__ import annotations
@@ -17,11 +21,14 @@ from .contracts import TextUnit
 from .integrity import WHITE
 
 # 强依赖词：后句离开前文就无法成立或会改变含义；弱转折（但是、不过、
-# 然后等）常是真正的意思转折，留给语义层判断，不在此列。
+# 然后等）不进入禁止切，其中对比／解释开头词只作下方普通边界证据。
 _DEPENDENT = re.compile(
     r"^(?:否则|不然|不如|相比之下|相比|相较|比起|即便|即使|哪怕|"
     r"因此|所以|因而|而且|并且|况且|但如果|可如果)"
 )
+# 对比或解释前文的开头词（1.3，适配方案§5.2.3第3条）：后句接着前句讲，
+# 前一叙述还没完成。只作用于普通边界；“另外、此外、然后”等引出新内容，不在此列。
+_OPEN_CONTRAST_OR_REASON = re.compile(r"^(?:但是|但|可是|然而|不过|只是|因为)")
 # 条件引导词；可带“但／可／而”前缀，如“但如果……”。
 _CONDITION = re.compile(r"^(?:但|可|而)?(?:如果|假如|要是|只要|除非|若是|倘若)")
 # “（一）”“(2)”等是编号题头，不是附着说明。
@@ -79,3 +86,17 @@ def analyze_gap_relations(text: str, units: Sequence[TextUnit]) -> tuple[tuple[s
     """
     return tuple(relation_reasons(text[left.start:left.end], text[right.start:right.end])
                  for left, right in zip(units, units[1:]))
+
+
+def opens_with_contrast_or_reason(right: str) -> bool:
+    """后句（gap 右侧完整候选单元）是否以对比或解释前文的词开头。
+
+    去掉行首空白、项目符号和 emoji 后再判断。返回 True 表示前一叙述尚未完成，
+    普通边界不应选在此处；这不是禁止切证据，不能否决必切或长度兜底。
+    """
+    return bool(_OPEN_CONTRAST_OR_REASON.match(_strip_lead(right)))
+
+
+def analyze_gap_continuations(text: str, units: Sequence[TextUnit]) -> tuple[bool, ...]:
+    """对每个既有 gap 判断后句是否以对比或解释词开头；长度为单元数减一。"""
+    return tuple(opens_with_contrast_or_reason(text[right.start:right.end]) for right in units[1:])

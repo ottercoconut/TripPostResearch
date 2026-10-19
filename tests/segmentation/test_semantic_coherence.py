@@ -118,7 +118,7 @@ def test_multiday_route_overview_and_wrapped_routes_share_one_parent():
 
 
 def test_multiday_route_overview_is_gray_zone_not_forced_day_cuts():
-    """路线目录只作证据：模型强烈提名时可切，但D1/D2箭头行不触发换天必切。"""
+    """路线目录内部不选普通边界（1.3），D1/D2箭头行也不触发换天必切。"""
     from tourism_ugc_study.segmentation.contracts import GapScore, SemanticDecision
     from tourism_ugc_study.segmentation.semantic_config import CoherentSemanticConfig
     from tourism_ugc_study.segmentation.semantic_meaning import partition_by_meaning
@@ -140,9 +140,10 @@ def test_multiday_route_overview_is_gray_zone_not_forced_day_cuts():
     decision = SemanticDecision("scored_split", (), gaps, selected, ())
     config = CoherentSemanticConfig(max_segment_tokens=512, edge_segment_nonspace_chars=1)
     result = partition_by_meaning(text, units, decision, config, Counter())
-    assert [segment.raw_text for segment in result.segments] == ["\n".join(parts[:2]), parts[2], parts[3], parts[4]]
+    assert [segment.raw_text for segment in result.segments] == [text]
     assert not any("selected_day_transition" in trace.reason_codes for trace in result.gap_decisions)
     assert any("inside_coherent_directory" in trace.reason_codes for trace in result.gap_decisions)
+    assert any("rejected_inside_coherent_block" in trace.reason_codes for trace in result.gap_decisions)
 
 
 def test_day_route_and_subitems_form_one_scope_and_end_before_next_day():
