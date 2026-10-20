@@ -14,7 +14,7 @@
 ## 当前数据与执行绑定
 
 - `text-segmentation-research.json`：客观／语义切分共用的只读来源绑定，配对候选库、正文快照和manifest SHA；成员为10,914条keep，人工终审状态不变。正式发布前另核对Admin实际配对来源。
-- `text-segmentation-semantic-8b-coherent.json`：用户采纳并冻结的完整介绍／推荐块规则，绑定Qwen3-Embedding-8B及当前参数；唯一活跃切分配置。旧0.6B及8B结构配置已退役入档。算法冻结不等于正式全量或管理端发布完成，调用见[语义适配协议](../docs/protocols/语义文本切分适配与验证方案.md#s11)。
+- `text-segmentation-semantic-8b-coherent.json`：切分阶段最终版`semantic-coherent-ugc-1.3.1`（配置指纹`2796db35…`，Git标记`segmentation-final`），绑定Qwen3-Embedding-8B固定revision及当前参数；唯一活跃切分配置。旧0.6B及8B结构配置已退役入档。正式全量、入库与管理端切换见总备忘录B05，调用见[语义适配协议](../docs/protocols/语义文本切分适配与验证方案.md#s11)。
 - `cleaning-research-round-autodl.yaml`：当前完成轮次`research-cleaning-20260911-autodl-r2`，种子20260911，17,853条模型输入、1,402条原人工证据、每批500条共36批；输入SHA、模型、规范化和历史证据均精确绑定。
 - `cleaning-inference-cuda.yaml`：本次CUDA执行身份，同帖视图batch=8；不改变冻结模型、精度、2048-token完整分块及0.31/0.96阈值，不与MPS缓存混用。
 - `cleaning-data-freeze-20260912.json`：原始内容/媒体归档、研究输入、候选、完整推理及环境证据的封存路径与SHA锚，不含机器绝对路径。完成身份由`governance/research-data-freezes.json`登记，规则见[冻结协议](../docs/protocols/研究数据冻结与校验.md)。

@@ -67,14 +67,11 @@ AutoDL-r2已完成17,853条纯预测，另承接1,402条同规范正文人工证
 
 ## 文本切分
 
-文本编码采用embedding自然语义分段；`semantic-coherent-ugc-1.0`连贯块算法已冻结并完成全量运行，
-当前算法为`semantic-coherent-ugc-1.2`分层规则（规则管禁止切与换天必切，模型只在灰色地带选择）；正式全量运行与发布仍待验收。`objective-structure-0.5`已在独立`segmentation`模块中实现，旧发布结果为
-10,914帖／191,844段，通过`source_post_id`关联原帖，TripPostAdmin已接入。
-旧算法仅保留历史归档，当前代码已移除旧客观和0.1／0.2兼容；新的TextTiling语义工程路径使用冻结规则，正式活动结果是否切换见B05。
-两种算法共用`text_segments`七字段结构，新批次使用新的发布包与片段身份。
+文本编码采用embedding自然语义分段（Qwen3-Embedding-8B，TextTiling式连贯度评分）。切分阶段最终版为`semantic-coherent-ugc-1.3.1`分层规则：规则管禁止切、换天与独立小节必切，模型只在普通边界上选择。2026年10月20日负责人定为最终版，Git标记为`segmentation-final`。正式全量10,914帖共42,637段，单表包为`text-segments-semantic-1.3.1-20261020`（batch `c0c4a94f…`），TripPostAdmin已切换读取该包；此前建立的任务仍读各自冻结的快照。切分规则至此关闭，此后的切点疑问只记录，不重切。
+更早的1.0—1.3及`objective-structure-0.5`客观切分（10,914帖／191,844段）只从Git标记、运行包和历史归档追溯，当前代码不再生成或兼容旧版本。各版本共用`text_segments`七字段结构，新批次使用新的发布包与片段身份。
 
-- 当前进度、证据与下一步：[总备忘录B05](docs/planning/研究问题与待办总备忘录.md#b05embedding自然语义分段与工程接入)。
-- 新语义路径的接口、短帖规则与验收：[适配与验证方案](docs/protocols/语义文本切分适配与验证方案.md)。
+- 运行、验收与管理端切换证据：[总备忘录B05](docs/planning/研究问题与待办总备忘录.md#b05embedding自然语义分段与工程接入)。
+- 现行规则、已知局限与复现方式：[适配与验证方案§5.2.3](docs/protocols/语义文本切分适配与验证方案.md#implementation-1-3)。
 - 旧客观结果与历史归档身份：[客观模块接入协议](docs/protocols/客观文本切分模块接入.md)。
 
 ## 当前可用入口
