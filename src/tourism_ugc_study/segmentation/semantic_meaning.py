@@ -5,15 +5,17 @@
 和阈值由调用者明确保存。1.3（适配方案§5.2.3）的优先级为：禁止切＞换天与
 独立小节必切＞长度兜底＞普通边界。普通边界只来自过深度门槛的语义谷值，
 且须前文已完成、不在同栏目清单内部；句号、换行、编号、题头形态或属性变化
-本身都不触发切分。最后只撤销切点：无文字碎段、过短首末段、只有题头的片段
-及独立小节前单独剩下的收束句并入相邻段。运行结果仍须抽查，不能自动证明
-所有片段均符合人的切分直觉。无法在既有 gap 上表达的意思转换保留为限制，
-不能移动到句内相邻位置代替。
+本身都不触发切分。1.3.1（开发试验）另把放错位置的普通切点移到所属边界：
+条目参数行留在前项、挂在前段末尾的标题随后文、标题前单独一句收束语留在前节，
+落点须是可确认的题头或下一条目首行，否则保留原位；换天逐行识别，不依赖结构提名。最后只撤销切点：无文字碎段、过短首末段、只有
+题头的片段及独立小节前单独剩下的收束句并入相邻段。运行结果仍须抽查，不能
+自动证明所有片段均符合人的切分直觉。无法在既有 gap 上表达的意思转换保留为
+限制，不能移动到句内相邻位置代替。
 """
 
 from __future__ import annotations
 
-from bisect import bisect_right, insort
+from bisect import bisect_left, bisect_right, insort
 from dataclasses import asdict, dataclass
 from math import isfinite
 import re
@@ -27,20 +29,25 @@ from .semantic_coherence import discover_coherent_blocks
 from .semantic_relations import analyze_gap_continuations, analyze_gap_relations
 from .semantic_sections import (
     XHS_EMOJI_CODE, SectionCandidate, SectionLine, count_sentences, discover_sections,
-    first_complete_end, metadata_text, separator_text,
+    first_complete_end, introduces_schedule, label_field, leading_mark, marker_class, metadata_text,
+    parameter_text, separator_text,
 )
 from .semantic_structure import (
     StructureBlock, analyze_gap_structure, discover_context_blocks,
     discover_structure_blocks,
 )
 
-EXPERIMENT_ID = "meaning-layers-3"
+EXPERIMENT_ID = "meaning-layers-4"
 _LINES = re.compile(r"\r\n|[\r\n\u2028\u2029]")
 _DAY = re.compile(r"(?:day\s*\d+|d\s*\d+|第[0-9一二三四五六七八九十百]+天)(?![0-9])", re.I)
 _DATE = re.compile(r"(?:\d{2,4}年)?\d{1,2}月\d{1,2}日")
 _ATTRIBUTE = re.compile(r"^(?:交通|地址|位置|导航|时间|时长|开放时间|营业时间|门票|票价|价格|费用|预约|停车|电话|优点|缺点|亮点)\s*[:：|｜]")
 _NUMBER = re.compile(r"^(?:\d+[、．.）)]|[一二三四五六七八九十百]+[、．.]|[（(][一二三四五六七八九十百\d]+[）)])")
 _STRONG = frozenset("。！？!?；;")
+_PICTURE_NOTE = re.compile(r"[，,]\s*(?:图|[pP])\s*\d+(?:\s*[-~—–]\s*\d+)?\s*$")
+# 天序数字：Day3、D3、第三天；用于识别同一天的重复标题（如“Day3”下一行“第三天去了……”）。
+_DAY_NUMBER = re.compile(r"(?:day\s*(\d+)|d\s*(\d+)|第([0-9一二三四五六七八九十百]+)天)", re.I)
+_CHINESE_DIGITS = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
 
 
 @dataclass(frozen=True)
@@ -158,7 +165,8 @@ def _heading(value: str) -> _Heading | None:
     本启发式不读取对象名词表，也不声称解决完整中文句法或标题层级。
     """
     plain = _plain(value)
-    if not plain or metadata_text(value) or _ATTRIBUTE.match(plain):
+    # 人均、价格、地址等条目参数行属于所在条目，不是题头（1.3.1）。
+    if not plain or metadata_text(value) or _ATTRIBUTE.match(plain) or parameter_text(value):
         return None
     trailing_start = _trailing_schedule_start(value)
     if trailing_start is not None:
@@ -173,9 +181,12 @@ def _heading(value: str) -> _Heading | None:
         return None
     # 括号附注中的评价不否定名词式题头主体；正文的强标点仍排除。
     core = re.sub(r"[（(][^()（）]*[）)]", "", plain).strip()
+    # 行尾“，图4”“，p2-3”只是配图指引，不使标题变成句子（1.3.1）。
+    core = _PICTURE_NOTE.sub("", core)
     if any(c in core for c in "，,。！？!?；;") or not core:
         return None
-    if re.match(r"^(?:我(?:们)?|你(?:们)?|他(?:们)?|她(?:们)?|大家|今天|昨天|明天|可以|需要|应该|建议|不能|不用|无需|一定)", core):
+    # “我的路线”“我们的行程”这类所有格开头是名词式标题，不是第一人称叙述（1.3.1）。
+    if re.match(r"^(?:我(?:们)?(?!的)|你(?:们)?(?!的)|他(?:们)?|她(?:们)?|大家|今天|昨天|明天|可以|需要|应该|建议|不能|不用|无需|一定)", core):
         return None
     if re.search(r"没有|很|非常|十分|太|已经|正在|觉得|喜欢|值得|[了着](?:$|[的呢呀吧])", core):
         return None
@@ -249,6 +260,10 @@ def _meaning_blocks(text: str, units: Sequence[TextUnit]) -> tuple[StructureBloc
             continue
         body_index = index + 1
         following = headings[body_index]
+        # “信号山：官方预约”这类字段行本身已带内容；下一行是题头形态时它是另一项或新
+        # 标题，不是字段的说明，不绑定（1.3.1）。
+        if following is not None and label_field(value):
+            continue
         if following is not None and following.explicit:
             bare_label = _plain(value)
             following_value = _plain(text[lines[body_index].start:lines[body_index].end])
@@ -324,6 +339,122 @@ def _day_heading(text: str, start: int) -> bool:
     return heading is not None and heading.kind in {"schedule_heading", "trailing_schedule_heading"}
 
 
+def _chinese_number(value: str) -> int | None:
+    """一至九十九的中文数字；更大或认不出时返回 None。"""
+    if "百" in value:
+        return None
+    if "十" in value:
+        tens, _, ones = value.partition("十")
+        if (tens and tens not in _CHINESE_DIGITS) or (ones and ones not in _CHINESE_DIGITS):
+            return None
+        return (_CHINESE_DIGITS[tens] if tens else 1) * 10 + (_CHINESE_DIGITS[ones] if ones else 0)
+    return _CHINESE_DIGITS.get(value)
+
+
+def _day_number(value: str) -> int | None:
+    """行首天序（Day3、D3、第三天）的数值；日期或认不出时返回 None。"""
+    match = _DAY_NUMBER.match(_plain(value))
+    if not match:
+        return None
+    digits = next(group for group in match.groups() if group)
+    return int(digits) if digits.isdigit() else _chinese_number(digits)
+
+
+def _day_transition_lines(text: str, lines: Sequence[_Line]) -> tuple[frozenset[int], frozenset[int]]:
+    """返回（全部行首日程题头的行起点，换天切点应落在的行起点）。
+
+    1.3.1起换天不依赖结构提名，逐行检查。以下日程行不算换天：帖首行（没有切点）；
+    紧跟在无句末标点的帖子标题行之后的日程行（标题随第一天）；
+    与上一个日程题头天序相同的行（“Day3”之下又写“第三天去了……”，同一天的标题与
+    说明）；行程总览、目录中的光秃日程行（本行不带句子，且前一行也是光秃日程行，或
+    后一行是不同天序的光秃日程行；下一行是“7月25日，星期四”这类带句子的日期时
+    不算总览）；紧凑行程表中的日程行（前一行也是日程行且没有句末标点、天序递增，
+    即一行列完一天，如“D2：栈桥-八大关”“7月1日：12:00退潮”；一句话写一天的叙述、
+    总览之后重新从第一天写起的详细行程仍换天）。日程行紧跟在引出它的
+    标题之后时（“📝行程安排”“出行攻略：”之下的第一天），换天切点上移到该标题之前，
+    标题随这一天；标题在帖首时不切。引出标题须以冒号结束或带行程、路线、安排等日程
+    词，上一天末尾的条目短行（“台东夜市”）不算；清单项、“标签：内容”字段和参数行
+    也不算。行尾附带的日程（“……。📍Day2”）
+    不在此列，仍由结构提名处理。
+    """
+    values = [text[line.start:line.end] for line in lines]
+    headings = [_heading(value) for value in values]
+    is_day = [heading is not None and heading.kind == "schedule_heading" for heading in headings]
+    bare = [day and not any(c in value for c in "，,。！？!?；;") for day, value in zip(is_day, values)]
+    numbers = [_day_number(value) if day else None for value, day in zip(values, is_day)]
+    all_days, transitions = set(), set()
+    last_number: int | None = None
+    for index, line in enumerate(lines):
+        if not is_day[index]:
+            continue
+        all_days.add(line.start)
+        number = numbers[index]
+        same_day = number is not None and number == last_number
+        if number is not None:
+            last_number = number
+        if index == 0 or same_day:
+            continue
+        previous = values[index - 1]
+        # 帖子首行是没有句末标点的标题时，紧接的第一天随标题，不把标题单独切出。
+        if index == 1 and not any(c in previous for c in "。！？!?"):
+            continue
+        # 天序不递增（总览之后又从第一天写起）说明进入详细行程，不按总览或紧凑行程表排除。
+        rising = number is None or numbers[index - 1] is None or number > numbers[index - 1]
+        if bare[index] and ((bare[index - 1] and rising) or (index + 1 < len(lines) and bare[index + 1]
+                                                             and numbers[index + 1] != number)):
+            continue
+        if is_day[index - 1] and not any(c in previous for c in "。！？!?") and rising:
+            continue
+        body = previous.lstrip("".join(WHITE))
+        listed = body[:1] in "-·•*▪▫◦‧・" or bool(_NUMBER.match(body) and not _SECTION_NUMBER.match(body))
+        introduces = introduces_schedule(previous)
+        if (headings[index - 1] is not None and not is_day[index - 1] and not listed and not label_field(previous)
+                and introduces and not parameter_text(previous) and not any(c in previous for c in "，,。！？!?；;")):
+            if index - 1 > 0:
+                transitions.add(lines[index - 1].start)
+            continue
+        transitions.add(line.start)
+    return frozenset(all_days), frozenset(transitions)
+
+
+def _ends_sentence(value: str) -> bool:
+    """去掉尾部空白、闭符和装饰后以句末标点结束。"""
+    end = len(value)
+    while end and (value[end - 1] in WHITE or value[end - 1] in "”’」』)）】]》〉\"'️"
+                   or unicodedata.category(value[end - 1])[0] in {"S", "M"}):
+        end -= 1
+    return bool(end) and value[end - 1] in "。！？!?…～~"
+
+
+def _list_item_line(text: str, start: int, end: int) -> bool:
+    """[start, end) 所在行以项目符号（-·•等）开头，且相邻的上一或下一非空行以同一符号开头。
+
+    这样的行是清单项，不是纯标签小标题（1.3.1）。
+    """
+    body = text[start:end].lstrip("".join(WHITE))
+    if not body or body[0] not in "-·•*▪▫◦‧・":
+        return False
+    mark = body[0]
+    previous = text[:start].rstrip("".join(WHITE))
+    previous_line = previous[previous.rfind("\n") + 1:].lstrip("".join(WHITE)) if previous else ""
+    following = text[end:].lstrip("".join(WHITE))
+    following_line = _LINES.split(following, 1)[0] if following else ""
+    return previous_line.startswith(mark) or following_line.startswith(mark)
+
+
+def _last_list_item_line(text: str, start: int, end: int) -> bool:
+    """清单的最后一项：上一行以同一项目符号开头，下一非空行不是。
+
+    只有末项之后的切点不受“标签之后禁止切”否决（清单结束、进入下一部分）；清单
+    内部两项之间仍按标签行否决，不在清单中间切开（1.3.1）。
+    """
+    if not _list_item_line(text, start, end):
+        return False
+    mark = text[start:end].lstrip("".join(WHITE))[0]
+    following = text[end:].lstrip("".join(WHITE))
+    return not (_LINES.split(following, 1)[0] if following else "").startswith(mark)
+
+
 def _label_heading_line(text: str, end: int) -> bool:
     """判断以 end 结束的整行是否为明确的纯标签小标题，其后正文不能被切走。
 
@@ -333,9 +464,11 @@ def _label_heading_line(text: str, end: int) -> bool:
     普通短句误当题头而少切。
     """
     starts = [match.end() for match in _LINES.finditer(text, 0, end)]
-    line = text[starts[-1] if starts else 0:end]
+    line_start = starts[-1] if starts else 0
+    line = text[line_start:end]
     heading = _heading(line)
-    if heading is None:
+    # 清单末项之后是清单的结束，不按标签行否决；清单中间各项之间仍否决（1.3.1）。
+    if heading is None or _last_list_item_line(text, line_start, end):
         return False
     # 日程识别只看行首“第X天／DayN”，同行接着写叙述（带逗号或句末标点）时整行
     # 是当天正文，不是纯标签；否则“第一天我们……。”之后的换天切点会被误否决（1.3修正）。
@@ -567,6 +700,9 @@ def _before_label_lines(features: Sequence, labels: Sequence[bool], index: int) 
 
 
 _COHERENT_KINDS = frozenset({"coherent_enumeration", "coherent_schedule", "coherent_directory", "coherent_item"})
+# 以题头行自身为起点的“题头与首说明”保护块；与标签否决同源，不阻止切点上移到题头前。
+_OWN_HEADING_KINDS = frozenset({"explicit_heading", "unmarked_heading", "directory_lead", "schedule_heading",
+                                "repeated_entry_lead", "section_heading"})
 
 
 def _sibling_groups(lines: Sequence[_Line], repeated: Sequence[StructureBlock]) -> tuple[frozenset[int], ...]:
@@ -602,6 +738,160 @@ def _sibling_groups(lines: Sequence[_Line], repeated: Sequence[StructureBlock]) 
     return tuple(frozenset(group) for group in groups.values() if len(group) >= 2)
 
 
+# 可作为移动目标的题头形态；纯文字短行（unmarked）还须是没有被判为“不像标题”的小节候选。
+_MOVE_KINDS = frozenset({"explicit_heading", "directory_lead", "schedule_heading"})
+_NOT_TITLE = frozenset({"section_heading_narrative", "section_heading_too_long", "section_heading_sentence_fragment",
+                        "section_heading_list_number", "section_heading_bullet_marker",
+                        "section_heading_after_title_only", "section_heading_item_line"})
+# 小节检查判为清单条目的原因码；这样的行不是标签小标题，也不触发标签上移。
+_LIST_REASONS = frozenset({"section_heading_list_number", "section_heading_list_sequence",
+                           "section_heading_item_line"})
+# 纯文字短行只有在小节检查中确认为小节或子标题时，才能作为移动切点的目标。
+_PLAIN_MOVE_REASONS = frozenset({"selected_section_heading", "section_heading_subsection"})
+_SECTION_NUMBER = re.compile(r"^(?:[一二三四五六七八九十百]+、|[（(][一二三四五六七八九十百]+[）)])")
+
+
+def _movable_heading(text: str, lines: Sequence[_Line], index: int, siblings: frozenset[int],
+                     candidate_reasons: dict[int, str]) -> bool:
+    """该行能否作为移动切点的标题：人一眼能认出的题头，而不是清单项、字段或参数。
+
+    须为题头形态且不含句子标点（行尾配图指引除外）；同形条目、项目符号或阿拉伯
+    数字编号开头的清单项，“标签：内容”字段和参数行不算；小节检查判为不像标题或
+    清单序列的行不算；纯文字短行须已确认为独立小节或子标题，或是清单引导行——没有
+    标记的短行常是清单项或换行截断的半句，不能凭形态把切点挪到它前面。
+    """
+    line = lines[index]
+    value = text[line.start:line.end]
+    heading = _heading(value)
+    if heading is None or index in siblings or label_field(value) or parameter_text(value):
+        return False
+    body = value.lstrip("".join(WHITE))
+    if body[:1] in "-·•*▪▫◦‧・" or (_NUMBER.match(body) and not _SECTION_NUMBER.match(body)):
+        return False
+    if any(c in _PICTURE_NOTE.sub("", body.rstrip("".join(WHITE))) for c in "，,。！？!?；;"):
+        return False
+    # 清单引导行（“……分别是：”）即使带判断词，也与其后的清单一体。
+    if _list_lead(text, lines, index):
+        return True
+    reason = candidate_reasons.get(line.start)
+    if reason in _NOT_TITLE or reason == "section_heading_list_sequence":
+        return False
+    if heading.kind in _MOVE_KINDS or marker_class(value) == "ordinal":
+        return True
+    return heading.kind == "unmarked_heading" and reason in _PLAIN_MOVE_REASONS
+
+
+def _list_lead(text: str, lines: Sequence[_Line], index: int) -> bool:
+    """以冒号结束、其后至少两行以同一标记开头的行是清单引导行（“图3到图5的建筑分别是：”）。
+
+    引导行与它引出的清单是一体，切点可以移到引导行之前。
+    """
+    value = text[lines[index].start:lines[index].end].rstrip("".join(WHITE))
+    if not value.endswith((":", "：")) or index + 2 >= len(lines):
+        return False
+    marks = [leading_mark(text[lines[i].start:lines[i].end]) for i in (index + 1, index + 2)]
+    return marks[0] is not None and marks[0] == marks[1]
+
+
+def _entry_start(text: str, lines: Sequence[_Line], index: int, siblings: frozenset[int],
+                 candidate_reasons: dict[int, str]) -> bool:
+    """该行开始一个新条目：可移动的标题，或同形条目、编号条目的首行（“2️⃣ 面馆”）。"""
+    body = text[lines[index].start:lines[index].end].lstrip("".join(WHITE))
+    return (_movable_heading(text, lines, index, siblings, candidate_reasons) or index in siblings
+            or bool(_NUMBER.match(body)) or marker_class(body) == "numbered")
+
+
+def _settle_boundaries(text: str, units: Sequence[TextUnit], lines: Sequence[_Line], siblings: frozenset[int],
+                       candidate_reasons: dict[int, str], cuts: list[int], mandatory: set[int],
+                       blocked: Sequence[bool], contrasts: Sequence[bool], reasons: list[list[str]],
+                       evidence: list[list[tuple[str, int, int]]], line_gap) -> list[int]:
+    """把放错位置的普通切点移到所属边界（1.3.1），就地修改 cuts，返回移动后的目标 gap。
+
+    只处理落在行首的普通切点，按顺序检查三种情形，命中一种即止：
+    ①前段末尾是标题，或标题加一行（至多一句）首说明，而后段不以标题开头：切点移到
+    标题之前，标题随后文；后段已以标题开头时原切点正确，不动；
+    ②后段开头是前一条目的参数行（人均、地址、价格……，连同紧随的“标签：内容”字段
+    组成参数块）：参数块之后是标题或下一条目的首行时，切点移到该行之前；后段只有参数块时撤销该切点，
+    参数留在前项；参数块之后不是标题时保留原位，不把参数块拆开；
+    ③后段第一行只是一句已完成的普通叙述、第二行是标题：切点移到标题之前，收束句
+    留在前节。
+    ①先于②：前段以标题结束时，随后的参数属于该标题，应一起随后文。目标须是既有
+    gap、不被禁止切否决、后句不以对比／解释词开头，且不越过相邻切点；不满足时保留
+    原位。换天与独立小节必切（mandatory）不移动；本函数不新增切点。
+    """
+    line_starts = [line.start for line in lines]
+    starts_at_line = set(line_starts)
+    moved: list[int] = []
+
+    def value(index: int) -> str:
+        return text[lines[index].start:lines[index].end]
+
+    for cut in [index for index in cuts if index not in mandatory]:
+        position = cuts.index(cut)
+        low = cuts[position - 1] if position else -1
+        high = cuts[position + 1] if position + 1 < len(cuts) else len(units) - 1
+        here = units[cut + 1].start
+        if here not in starts_at_line:
+            continue
+        begin, finish = units[low + 1].start, units[high].end
+        before = [i for i in range(bisect_left(line_starts, begin), bisect_left(line_starts, here))]
+        after = [i for i in range(bisect_left(line_starts, here), bisect_left(line_starts, finish))]
+
+        def allowed(target: int | None) -> bool:
+            return target is not None and low < target < high and not blocked[target] and not contrasts[target]
+
+        def move(target: int, why: str) -> None:
+            reasons[cut].append(why)
+            reasons[target].append("selected_moved_boundary")
+            evidence[target].append(("moved_from_gap", units[cut].end, units[cut + 1].start))
+            cuts.remove(cut)
+            if target not in cuts:
+                insort(cuts, target)
+            moved.append(target)
+
+        def heading(index: int) -> bool:
+            return _movable_heading(text, lines, index, siblings, candidate_reasons)
+
+        if not (after and heading(after[0])):
+            done = False
+            for back in (2, 1):
+                if len(before) <= back or not heading(before[-back]):
+                    continue
+                if back == 2 and count_sentences(text, lines[before[-1]].start, lines[before[-1]].end) > 1:
+                    continue
+                target = line_gap(lines[before[-back]].start)
+                if allowed(target):
+                    move(target, "moved_before_heading")
+                    done = True
+                    break
+            if done:
+                continue
+        count = 0
+        if after and parameter_text(value(after[0])):
+            while count < len(after) and (parameter_text(value(after[count])) or label_field(value(after[count]))):
+                count += 1
+        if count and not (before and heading(before[-1])):
+            if count == len(after):
+                reasons[cut].append("merged_trailing_parameters")
+                cuts.remove(cut)
+                continue
+            if _entry_start(text, lines, after[count], siblings, candidate_reasons):
+                target = line_gap(lines[after[count]].start)
+                if allowed(target):
+                    move(target, "moved_after_item_parameters")
+                    continue
+        if len(after) < 2:
+            continue
+        first = value(after[0])
+        if (_closing_sentence(first) and _ends_sentence(first)
+                and count_sentences(text, lines[after[0]].start, lines[after[0]].end) == 1
+                and heading(after[1])):
+            target = line_gap(lines[after[1]].start)
+            if allowed(target):
+                move(target, "moved_after_closing_sentence")
+    return moved
+
+
 def _section_candidates(text: str, units: Sequence[TextUnit]) -> tuple[SectionCandidate, ...]:
     """以本模块的题头识别和重复条目证据，交给 semantic_sections 做小节确认。"""
     lines = _lines(text)
@@ -622,9 +912,12 @@ def partition_by_meaning(text: str, units: Sequence[TextUnit], decision: Semanti
     不要求语义曲线下降，碎段合并也不撤销。普通边界只来自过深度门槛（或绝对
     连贯度门槛）的语义谷值，并须满足：未被禁止切否决、后句不以对比／解释词
     开头、不在同栏目清单等连贯块内部。小标题、编号条目等结构形态本身不再
-    放宽门槛。唯一的移动是只被“纯标签小标题之后”否决的普通边界：若标签行以
-    题头标记开头，切点上移到标签行之前（目标处同样须通过上述检查）。长度兜底
-    只处理超限；最后由 _merge_fragments 撤销碎段、题头孤段和小节前收束句的切点。
+    放宽门槛。只被“纯标签小标题之后”否决的普通边界，若标签行以题头标记开头，
+    切点上移到标签行之前（目标处同样须通过上述检查）。1.3.1另有两处变化：换天
+    逐行识别（_day_transition_lines），不依赖结构提名；普通切点选定后由
+    _settle_boundaries 把放错位置的切点移到所属边界（标题随后文、参数留前项、
+    收束句留前节）。长度兜底只处理超限；最后由 _merge_fragments 撤销碎段、题头
+    孤段和小节前收束句的切点。
     结构跨度没有准确已有 gap 时记录 unavailable，不创造单元。N=0/1仍检验原文和
     实际token；异常抛 ValueError，不返回半帖。
     """
@@ -634,11 +927,27 @@ def partition_by_meaning(text: str, units: Sequence[TextUnit], decision: Semanti
     contrasts = analyze_gap_continuations(text, units)
     coherent = discover_coherent_blocks(text, units)
     starts = {unit.start: index - 1 for index, unit in enumerate(units) if index}
+    unit_starts = [unit.start for unit in units]
+    lines = _lines(text)
+    line_starts = [line.start for line in lines]
+    repeated = [block for block in discover_structure_blocks(text, units) if block.kind == "repeated_entry"]
+    sibling_lines = frozenset(member for group in _sibling_groups(lines, repeated) for member in group)
+    day_starts, day_transitions = _day_transition_lines(text, lines)
+
+    def line_gap(start: int) -> int | None:
+        """行起点所在的 gap：右侧单元从该行开始（单元前导空白不计）；行在帖首或行中时为 None。"""
+        index = bisect_right(unit_starts, start) - 1
+        if index <= 0 or any(char not in WHITE for char in text[units[index].start:start]):
+            return None
+        return index - 1
+
     unavailable: list[tuple[str, int, int]] = []
     section_gaps: dict[int, SectionCandidate] = {}
     candidate_gaps: dict[int, SectionCandidate] = {}
+    candidate_reasons: dict[int, str] = {}
     section_blocks: list[StructureBlock] = []
     for candidate in _section_candidates(text, units):
+        candidate_reasons[candidate.start] = candidate.reason
         gap = starts.get(candidate.start)
         if candidate.protected:
             # 题头组与首个完整说明之间禁止切，题头不能挂在上一节末尾或单独成段。
@@ -717,9 +1026,18 @@ def partition_by_meaning(text: str, units: Sequence[TextUnit], decision: Semanti
         labels.append(label or separated)
         after_separator.append(separated and not veto)
         # 只被“纯标签小标题之后”否决的提名，切点可以上移到标签行之前；
-        # 同时触发其他禁止切规则的位置仍直接否决。
+        # 同时触发其他禁止切规则的位置仍直接否决。1.3.1起，标签行自身的“题头与首说明”
+        # 保护与标签否决同源，也允许上移，不再因此丢掉这个分界。
+        own_start = 0
+        if label or separated:
+            breaks = [match.end() for match in _LINES.finditer(text, 0, units[index].end)]
+            own_start = breaks[-1] if breaks else 0
+            while own_start < units[index].end and text[own_start] in WHITE:
+                own_start += 1
+        foreign = [block for block in protecting
+                   if not (block.kind in _OWN_HEADING_KINDS and block.start == own_start)]
         label_only.append((label or separated)
-                          and not (bracket or tail or protecting or relations[index] or continuation))
+                          and not (bracket or tail or foreign or relations[index] or continuation))
         ranks.append(None if veto or (internal and not spaced) else
                      2 if feature.boundary_kind == "line" else 1 if feature.boundary_kind == "sentence" else 0)
         reasons.append(local)
@@ -760,6 +1078,17 @@ def partition_by_meaning(text: str, units: Sequence[TextUnit], decision: Semanti
         if not _marked_heading(first_line):
             reasons[index].append("shift_before_label_heading_unmarked")
             return None
+        # 同形条目、成串项目符号或小节检查判为清单条目的一项是清单内容，不是标签
+        # 小标题；不因它把普通切点上移进清单（如打分清单“9.0分××｜……”），原否决
+        # 照常生效。换天必切不受此限，仍上移到标签行之前（1.3.1）。
+        head = units[target + 1].start
+        while head < len(text) and text[head] in WHITE:
+            head += 1
+        row = bisect_right(line_starts, head) - 1
+        if not day and row >= 0 and (row in sibling_lines or _list_item_line(text, lines[row].start, lines[row].end)
+                         or candidate_reasons.get(lines[row].start) in _LIST_REASONS):
+            reasons[index].append("shift_before_label_heading_list_item")
+            return None
         if not day and target not in cuts and not ordinary(target):
             reasons[index].append("shift_before_label_heading_rejected")
             return None
@@ -782,20 +1111,47 @@ def partition_by_meaning(text: str, units: Sequence[TextUnit], decision: Semanti
         insort(cuts, index)
         structural_targets.add(index)
         reasons[index].append("selected_section_heading")
+    def day(start: int) -> bool:
+        """结构提名起点是否为真实换天：行首日程按逐行检查结果，行尾附带日程沿用题头识别。"""
+        return start in day_transitions if start in day_starts else _day_heading(text, start)
+
+    day_handled: set[int] = set()
     for index in sorted(structural):
         if blocked[index]:
             reasons[index].append("rejected_structure_dependency")
-            if any(_day_heading(text, block.start) for block in structural[index]):
+            if any(day(block.start) for block in structural[index]):
+                day_handled.add(index)
                 target = shift(index, True)
                 if target is not None:
                     structural_targets.add(target)
-        elif any(_day_heading(text, block.start) for block in structural[index]):
+        elif any(day(block.start) for block in structural[index]):
+            day_handled.add(index)
             if index not in cuts:
                 insort(cuts, index)
             reasons[index].append("selected_day_transition")
         elif index not in nominated and index not in section_gaps:
             # 1.3取消“小标题处语义略降即切”：结构形态须同时是过门槛的语义谷值。
             reasons[index].append("rejected_structure_below_valley")
+    # 1.3.1：换天不依赖结构提名。日程题头下一行是编号条目、【】标题，或本行较长时，
+    # 结构分析可能不提名该处，此前这些换天会漏切；这里逐行补齐，同样服从禁止切。
+    for start in sorted(day_transitions):
+        index = line_gap(start)
+        if index is None:
+            unavailable.append(("day_transition", start, start))
+            continue
+        if index in day_handled or "selected_day_transition" in reasons[index]:
+            continue
+        sources[index].append("day_transition_scan")
+        if blocked[index]:
+            reasons[index].append("rejected_day_dependency")
+            target = shift(index, True)
+            if target is not None:
+                structural_targets.add(target)
+            continue
+        if index not in cuts:
+            insort(cuts, index)
+        structural_targets.add(index)
+        reasons[index].append("selected_day_transition")
     semantic: list[int] = []
     mandatory = set(cuts)
     for index in sorted(nominated):
@@ -818,6 +1174,8 @@ def partition_by_meaning(text: str, units: Sequence[TextUnit], decision: Semanti
         reasons[index].append("selected_local_semantic")
         if index not in cuts:
             insort(cuts, index)
+    semantic.extend(_settle_boundaries(text, units, lines, sibling_lines, candidate_reasons, cuts, mandatory,
+                                       blocked, contrasts, reasons, evidence, line_gap))
     lengths, exception_spans = _length_partition(text, units, decision, config, counter, cuts, ranks)
     sections = {index for index in section_gaps if "selected_section_heading" in reasons[index]}
     locked = sections | {index for index in cuts if "selected_day_transition" in reasons[index]}

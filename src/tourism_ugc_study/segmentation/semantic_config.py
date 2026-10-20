@@ -13,10 +13,10 @@ import math
 from pathlib import Path
 import re
 
-COHERENT_RULE_VERSION = "semantic-coherent-ugc-1.3"
-COHERENT_IMPLEMENTATION_VERSION = "semantic-coherent-ugc-1.3-layers-3"
-COHERENT_PARTITION_ID = "meaning-layers-3"
-CURRENT_FROZEN_SETTINGS_SHA256 = "268a0d9c375ca87ce65733917ef91de56b4fc6cf31a1ed78626446afd8cd1330"
+COHERENT_RULE_VERSION = "semantic-coherent-ugc-1.3.1"
+COHERENT_IMPLEMENTATION_VERSION = "semantic-coherent-ugc-1.3.1-layers-4"
+COHERENT_PARTITION_ID = "meaning-layers-4"
+CURRENT_FROZEN_SETTINGS_SHA256 = "2796db3502879f5199afe94d2f407ebbeba8bd9cebe422aed31263dfcad45403"
 RUN_KIND = "semantic-text-segmentation-run"
 
 

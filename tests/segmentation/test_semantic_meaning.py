@@ -496,8 +496,11 @@ def test_wordless_fragments_join_previous_text_or_next_text_at_the_start():
 
 
 def test_fragment_merge_never_crosses_a_day_transition_or_the_length_trigger():
-    """换天切点不因首段过短而撤销；合并后超过长度触发线的也不合并。"""
-    parts = ["青岛三日游", "📅Day1 河岸慢游", "我们沿着河岸一直走到旧城城门，傍晚坐在河边看船。"]
+    """换天切点不因首段过短而撤销；合并后超过长度触发线的也不合并。
+
+    首段用普通短句而非标题：1.3.1起紧跟在标题之后的第一天随标题，不算换天。
+    """
+    parts = ["这次玩了三天。", "📅Day1 河岸慢游", "我们沿着河岸一直走到旧城城门，傍晚坐在河边看船。"]
     text, result = run(parts, selected=(0,), cohesion=0.2, edge_segment_nonspace_chars=16)
     assert result.segments[0].raw_text == parts[0]
     assert "selected_day_transition" in result.gap_decisions[0].reason_codes
@@ -671,6 +674,8 @@ def test_multiline_unpunctuated_list_is_not_a_single_closing_sentence():
     ("周五去逛街", "section_heading_narrative"),
     ("这里的氛围真的松弛", "section_heading_narrative"),
     ("沿着石板路往里走就能俯瞰层层叠叠的红屋顶", "section_heading_too_long"),
+    ("往里走就能看到海", "section_heading_narrative"),
+    ("3 各大景区门口卖的桂花糕", "section_heading_list_number"),
 ])
 def test_narrative_or_descriptive_short_lines_are_not_section_titles(line, reason):
     """不带标点的叙述短句或描述长行不是独立小节标题，不建立必切。"""
@@ -750,5 +755,319 @@ def test_consecutive_lines_with_the_same_marker_are_list_items_not_a_title_group
              "时间不够可以缩短行程。", "结构保持不变就行。"]
     text, result = run(parts)
     assert "section_heading_list_sequence" in result.gap_decisions[1].reason_codes
+    assert not any("selected_section_heading" in trace.reason_codes for trace in result.gap_decisions)
+    assert_integrity(text, result)
+
+
+# ---- 1.3.1开发试验：换天逐行识别、切点归属移动、小节层级与形式门槛 ----
+
+def test_day_heading_followed_by_numbered_items_is_still_a_day_transition():
+    """日程题头下一行是编号条目时结构分析可能不提名，1.3.1逐行识别后仍须换天。"""
+    parts = ["DAY3.海边", "上午在海边散步，下午去看灯塔。", "住宿：海边酒店附近",
+             "DAY4.山里", "1. 先坐缆车上山", "2. 中午在山顶吃饭"]
+    text, result = run(parts)
+    assert "\n".join(parts[3:]) in [s.raw_text for s in result.segments]
+    assert "selected_day_transition" in result.gap_decisions[2].reason_codes
+    assert_integrity(text, result)
+
+
+def test_bare_day_lines_of_an_overview_are_not_cut_one_by_one():
+    """行程总览中的光秃日程行没有各自展开，不逐行换天。"""
+    parts = ["这次一共玩了三天。", "Day1 栈桥", "Day2 崂山", "Day3 八大关", "下面按天详细说。"]
+    text, result = run(parts)
+    assert [s.raw_text for s in result.segments] == [text]
+    assert not any("selected_day_transition" in trace.reason_codes for trace in result.gap_decisions)
+
+
+def test_same_day_title_and_narrative_are_not_split():
+    """“Day3”之下又写“第三天去了……”是同一天的标题与说明，不在两者之间换天。"""
+    parts = ["第二天在市区逛了一整天。", "Day3 小鱼山", "第三天去了小鱼山，人很多。", "山顶能看到红屋顶。"]
+    text, result = run(parts)
+    assert [s.raw_text for s in result.segments] == [parts[0], "\n".join(parts[1:])]
+    assert "selected_day_transition" not in result.gap_decisions[1].reason_codes
+
+
+def test_item_parameters_stay_with_their_item_when_a_cut_lands_before_them():
+    """切点落在人均、地址等参数行之前时移到参数行之后，参数不挂到下一条目。"""
+    parts = ["1️⃣ 海鲜馆", "鲜虾饺子很好吃，汤也很鲜。", "人均💰60￥", "地址：海边路1号",
+             "2️⃣ 面馆", "面条筋道，浇头很足。"]
+    text, result = run(parts, selected=(1,))
+    assert [s.raw_text for s in result.segments] == ["\n".join(parts[:4]), "\n".join(parts[4:])]
+    assert "moved_after_item_parameters" in result.gap_decisions[1].reason_codes
+    assert "selected_moved_boundary" in result.gap_decisions[3].reason_codes
+    assert_integrity(text, result)
+
+
+def test_price_line_above_a_separator_is_not_a_heading():
+    """价格行不是题头：其下的分隔线不能把后面的切点上移到价格行之前。"""
+    parts = ["🚄 高铁｜青岛站到威海站", "💰 两个人 RM133", "⸻", "🌊 威海四天三夜", "住在海边酒店，推窗就是海。"]
+    text, result = run(parts, selected=(2,))
+    assert [s.raw_text for s in result.segments] == ["\n".join(parts[:3]), "\n".join(parts[3:])]
+    assert "selected_before_label_heading" not in result.gap_decisions[0].reason_codes
+    assert_integrity(text, result)
+
+
+def test_list_lead_and_first_item_left_at_the_end_move_with_the_list():
+    """清单引导行连同第一项挂在前段末尾时，切点移到引导行之前。"""
+    parts = ["八大关适合秋天去。", "树叶变色时最好看。", "图3到图5的建筑分别是：", "🏠图3→嘉木", "🏠图4→花石楼", "🏠图5→公主楼"]
+    text, result = run(parts, selected=(3,))
+    assert [s.raw_text for s in result.segments] == ["\n".join(parts[:2]), "\n".join(parts[2:])]
+    assert "moved_before_heading" in result.gap_decisions[3].reason_codes
+    assert_integrity(text, result)
+
+
+def test_single_closing_sentence_before_a_heading_stays_with_the_previous_part():
+    """普通切点之后只隔一句收束语就是标题时，切点移到标题之前，收束语留在前节。"""
+    parts = ["第一站在海边，风景很好。", "另外旁边还有一栋老楼。", "🌊 八大关", "红瓦绿树。"]
+    text, result = run(parts, selected=(0,))
+    assert [s.raw_text for s in result.segments] == ["\n".join(parts[:2]), "\n".join(parts[2:])]
+    assert "moved_after_closing_sentence" in result.gap_decisions[0].reason_codes
+    assert_integrity(text, result)
+
+
+def test_sub_headings_inside_an_ordinal_stop_are_not_separate_sections():
+    """“第X站：名称”是小节标题，不按“标签：内容”排除；站内的“自驾贴士”是子标题，不另作必切。"""
+    parts = ["开头介绍一下路线安排。", "两个地方都很好玩。", "🌄 第一站：崂山", "建议早上到。", "📌 自驾贴士：",
+             "· 导航到仰口", "· 提前预约车牌", "🌾 第二站：小麦岛", "建议傍晚到。", "📌 自驾贴士：", "· 岛外有停车场", "· 步行过桥"]
+    text, result = run(parts)
+    assert [s.raw_text for s in result.segments] == ["\n".join(parts[:2]), "\n".join(parts[2:7]), "\n".join(parts[7:])]
+    assert "section_heading_subsection" in result.gap_decisions[3].reason_codes
+    assert_integrity(text, result)
+
+
+def test_single_word_internal_character_does_not_veto_a_plain_title():
+    """“都市”的“都”这类词内字单独一个不否决标题；并列的两个城市小节都切开。"""
+    parts = ["这篇比较两个城市。", "先说结论再展开。", "青岛更像海滨都市", "有历史建筑和老城街景。", "玩法更丰富。",
+             "威海更像海边小城", "海水清、沙滩白。", "节奏也慢。"]
+    text, result = run(parts)
+    assert [s.raw_text for s in result.segments] == ["\n".join(parts[:2]), "\n".join(parts[2:5]), "\n".join(parts[5:])]
+    assert_integrity(text, result)
+
+
+def test_plain_title_after_list_fields_counts_as_a_finished_previous_part():
+    """前一行是“标签：内容”字段时前项已经结束，纯文字标题不再要求前一行有句末标点。"""
+    parts = ["出发前先看预约。", "崂山：官方公众号预约", "信号山：官方公众号预约", "穿搭建议", "海边拍照穿白色长裙。", "备一件外套防风。"]
+    text, result = run(parts)
+    assert [s.raw_text for s in result.segments] == ["\n".join(parts[:3]), "\n".join(parts[3:])]
+    assert "selected_section_heading" in result.gap_decisions[2].reason_codes
+    assert_integrity(text, result)
+
+
+@pytest.mark.parametrize("heading", ["📝我的路线", "❗❗徒步重点路段，图4"])
+def test_possessive_or_picture_noted_titles_are_headings_not_sentences(heading):
+    """“我的路线”所有格标题与行尾“，图4”配图指引都不使标题变成句子；其后的切点上移到标题前。"""
+    parts = ["前面先说交通。", "地铁和公交都很方便。", heading, "垭口到黄山口主要看渔村和海"]
+    text, result = run(parts, selected=(2,))
+    assert [s.raw_text for s in result.segments] == ["\n".join(parts[:2]), "\n".join(parts[2:])]
+    assert_integrity(text, result)
+
+
+@pytest.mark.parametrize("following,confirmed", [
+    ("百年青岛的血液里，流淌着啤酒的香气，每年夏天这里都会迎来八方来客，热闹非凡，人们在街头举杯畅饮。", True),
+    ("今年的会场更大。", False),
+])
+def test_long_plain_title_needs_a_paragraph_after_it(following, confirmed):
+    """13—20字的纯文字短行只有后接成段正文（文章式小标题）时才是标题，否则多是没打标点的叙述。"""
+    parts = ["这是关于啤酒节的报道。", "开幕式在周六晚上举行。", "两大会场亮点满满 营造节日氛围", following, "晚上还有灯光秀。"]
+    text, result = run(parts)
+    codes = result.gap_decisions[1].reason_codes
+    assert ("selected_section_heading" in codes) is confirmed
+    assert confirmed or "section_heading_too_long" in codes
+    assert_integrity(text, result)
+
+
+def test_short_line_after_a_numbered_heading_with_colon_is_its_sub_heading():
+    """“04 八大关风景区：万国建筑”是序号标题而不是“标签：内容”字段，其下的“核心亮点”是从属内容。"""
+    parts = ["这篇介绍几个景点。", "每个都值得去。", "04 八大关风景区：万国建筑", "核心亮点", "八条街道以关隘命名。", "欧式别墅错落分布。"]
+    text, result = run(parts)
+    assert "section_heading_previous_incomplete" in result.gap_decisions[2].reason_codes
+    assert not result.gap_decisions[2].selected
+    assert_integrity(text, result)
+
+
+def test_bullet_lines_are_list_items_not_section_titles():
+    """“·奥帆中心”这类项目符号开头的行是清单项，即使前一项已结束也不作独立小节。"""
+    parts = ["下午去了两个地方。", "都很推荐。", "·五四广场", "标志性的雕塑很好看。", "傍晚去最好！",
+             "·奥帆中心", "沿着海岸线散步看帆船。", "晚上有灯光秀。"]
+    text, result = run(parts)
+    assert "section_heading_bullet_marker" in result.gap_decisions[4].reason_codes
+    assert [s.raw_text for s in result.segments] == [text]
+    assert_integrity(text, result)
+
+
+def test_picture_index_lines_are_not_an_expansion_of_a_title():
+    """“图1-2：第三海水浴场”这类图片索引是配图说明，感叹短行之后只有图注时不算小节展开。"""
+    parts = ["春天和夏天真的不是盖的！！", "蓝天，白云，山海和鲜花！💐", "美到哭🥹", "图1-2：第三海水浴场",
+             "图3-4：崂山返岭前村", "图5：黄岛灵山岛", "图6-9：小麦岛公园"]
+    text, result = run(parts)
+    assert "section_heading_no_expansion" in result.gap_decisions[1].reason_codes
+    assert [s.raw_text for s in result.segments] == [text]
+    assert_integrity(text, result)
+
+
+def test_compact_itinerary_lines_without_sentence_ends_are_not_cut_one_by_one():
+    """一行列完一天、没有句末标点的紧凑行程表（或潮汐表）是一张清单，不逐行换天。"""
+    parts = ["给大家整理了行程。", "🔍D1：栈桥-八大关-五四广场", "🔍D2：崂山-青山渔村", "🔍D3：小麦岛-奥帆中心", "整体不赶，很轻松。"]
+    text, result = run(parts)
+    assert not any("selected_day_transition" in result.gap_decisions[i].reason_codes for i in (1, 2))
+    assert_integrity(text, result)
+
+
+def test_last_item_of_the_previous_day_is_not_taken_as_an_introducing_title():
+    """上一天末尾的条目短行（“台东夜市”）不是引出下一天的标题，换天仍切在日程行之前。"""
+    parts = ["第三天", "青岛海底世界（3小时）", "出海观光", "台东夜市", "第四天", "青山渔村和崂山。"]
+    text, result = run(parts)
+    assert "selected_day_transition" in result.gap_decisions[3].reason_codes
+    assert "selected_day_transition" not in result.gap_decisions[2].reason_codes
+    assert_integrity(text, result)
+
+
+@pytest.mark.parametrize("line", ["午饭 海泊桥早市200元", "p7-9青岛雕塑园", "圣弥厄尔大教堂 ↑"])
+def test_priced_entries_picture_indexes_and_captions_are_not_section_titles(line):
+    """带金额的条目、图片索引和指向配图的图注不是独立小节标题。"""
+    parts = ["这次去了海边。", "风景特别好。", line, "海边的人不多，很安静。", "傍晚还能看到日落。"]
+    text, result = run(parts)
+    assert "section_heading_item_line" in result.gap_decisions[1].reason_codes
+    assert [s.raw_text for s in result.segments] == [text]
+    assert_integrity(text, result)
+
+
+def test_entry_with_only_parameters_below_is_not_a_section():
+    """名称之下只有门票、开放时间等参数的是清单条目，参数不算小节展开。"""
+    parts = ["八大关有几座开放的楼。", "可以挑着进去看。", "花石楼", "门票：8.5元", "开放时间：8:00~18:00",
+             "蝴蝶楼", "门票：20元", "开放时间：9:00~18:00"]
+    text, result = run(parts)
+    assert "section_heading_no_expansion" in result.gap_decisions[4].reason_codes
+    assert not result.gap_decisions[4].selected
+    assert_integrity(text, result)
+
+
+def test_single_label_line_is_a_heading_not_a_field_before_a_plain_title():
+    """单独一行的“名称：说明”是题头，不是成串字段；其下的纯文字短行是从属内容，不另作小节。"""
+    parts = ["这家店在本地很有名。", "获得了很多好评。", "核心产品测评：海鲜烧烤与馄饨", "特色海鲜烧烤系列",
+             "包含海肠烤串、刀鱼烤串和烤鱿鱼。", "每一串都很新鲜。"]
+    text, result = run(parts)
+    assert "section_heading_previous_incomplete" in result.gap_decisions[2].reason_codes
+    assert not result.gap_decisions[2].selected
+    assert_integrity(text, result)
+
+
+def test_first_day_right_after_the_post_title_stays_with_the_title():
+    """帖子首行是标题、第二行就写“第一天……”时，不把标题单独切成一段。"""
+    parts = ["青岛旅游真实感受｜Day1", "第一天整体感受还是很不错的，就是到青岛太晚，最后一个景点没来得及去",
+             "#旅游中的小遗憾[话题]# #佛系旅游篇[话题]#"]
+    text, result = run(parts)
+    assert [s.raw_text for s in result.segments] == [text]
+    assert "selected_day_transition" not in result.gap_decisions[0].reason_codes
+    assert_integrity(text, result)
+
+
+def test_label_shift_does_not_move_a_cut_into_a_numbered_score_list():
+    """打分清单的一项（“9.0分××｜……”）不是标签小标题，其后被否决的切点不上移进清单。"""
+    parts = ["这次把黄岛的景点都打了分。", "9.4分滨海公园｜免费木栈道骑行，橘子海日落超出片", "9.2分渔人码头｜渔船码头吃海鲜",
+             "9.0分海上嘉年华｜海上摩天轮夜景绝佳", "其余银沙滩、星光岛等各有特色，按需选择。"]
+    text, result = run(parts, selected=(3,))
+    assert not result.gap_decisions[2].selected and not result.gap_decisions[3].selected
+    assert "selected_before_label_heading" not in result.gap_decisions[2].reason_codes
+    assert_integrity(text, result)
+
+
+def test_last_line_of_a_day_is_not_a_title_over_the_next_days():
+    """上一天末尾的短句（“晚上回酒店点外卖吃”）不是引出后面几天的标题，换天仍切在日程行之前。"""
+    parts = ["Day2️⃣：小麦岛-燕儿岛", "傍晚在小麦岛看日落，特别美！", "但是太阳落山后特别冷，还是要多穿点！", "晚上回酒店点外卖吃",
+             "Day3️⃣：鱼鸣嘴村-连三岛", "👉第三天去了黄岛！人特别少，景色也很美！"]
+    text, result = run(parts)
+    assert "selected_section_heading" not in result.gap_decisions[2].reason_codes
+    assert "selected_day_transition" in result.gap_decisions[3].reason_codes
+    assert_integrity(text, result)
+
+
+def test_news_subtitle_after_a_photo_source_line_is_a_section():
+    """新闻稿中图片来源行“(来源：信网)”之后前文已经结束，其后的文章式小标题确认为小节。"""
+    parts = ["啤酒节将于本周六开幕。", "全市各区同步举办活动。(来源：信网)", "两大会场亮点满满 营造节日氛围",
+             "百年青岛的血液里，流淌着啤酒的香气，每年夏天这里都会迎来八方来客，热闹非凡，人们在街头举杯畅饮。", "晚上还有灯光秀。"]
+    text, result = run(parts)
+    assert "selected_section_heading" in result.gap_decisions[1].reason_codes
+    assert_integrity(text, result)
+
+
+def test_picture_caption_does_not_swallow_the_next_heading_into_its_group():
+    """图注行（“p4是……”）不带副题组，紧随的“❣️ 返程推荐好物”仍单独作小节候选并确认。"""
+    parts = ["这几家店都很好吃。", "每家都排了很久的队。", "p4是本地人推荐的一些店铺", "❣️ 返程推荐好物",
+             "高铁站的贵宾厅很舒服，可以提前休息。", "里面还有免费的饮料和点心。"]
+    text, result = run(parts)
+    assert "section_heading_item_line" in result.gap_decisions[1].reason_codes
+    assert "selected_section_heading" in result.gap_decisions[2].reason_codes
+    assert_integrity(text, result)
+
+
+def test_emoji_prefixed_day_lines_are_the_expansion_of_a_schedule_title():
+    """“📝行程安排”之下是带emoji前缀的“🚶🏻‍♂️第1天：……”时，这些日程是它的展开，标题确认为小节。"""
+    parts = ["这次玩得很开心。", "刚回来就整理了这份分享。", "-", "📝行程安排", "🚶🏻‍♂️第1天：栈桥-天主教堂-信号山",
+             "🚶🏻‍♂️第2天：八大关-五四广场", "🚶🏻‍♂️第3天：石老人-小麦岛", "-", "🌈青岛住宿建议", "住在市南区最方便。"]
+    text, result = run(parts)
+    assert "selected_section_heading" in result.gap_decisions[2].reason_codes
+    assert_integrity(text, result)
+
+
+def test_detailed_itinerary_after_an_overview_starts_with_a_day_transition():
+    """总览列完Day1—Day3后又从Day1写起是详细行程，重新开始的Day1前换天。"""
+    parts = ["【游玩路线】", "Day1：栈桥-天主教堂", "Day2：小青岛-鲁迅公园", "Day3：奥帆中心-小麦岛",
+             "Day1：栈桥-天主教堂", "栈桥", "特色：青岛的标志性建筑，已有一百多年的历史。"]
+    text, result = run(parts)
+    assert "selected_day_transition" in result.gap_decisions[3].reason_codes
+    assert not any("selected_day_transition" in result.gap_decisions[i].reason_codes for i in (1, 2))
+    assert_integrity(text, result)
+
+
+def test_date_line_under_a_day_heading_does_not_make_it_an_overview():
+    """“第八天”下一行是“7月25日，星期四，多云”时不是行程总览，第八天前仍换天。"""
+    parts = ["火车到泰安时天已经黑了，早早睡下。", "08", "第八天", "7月25日，星期四，多云", "小熊一早就背起了诗句，准备爬山。"]
+    text, result = run(parts)
+    assert any("selected_day_transition" in result.gap_decisions[i].reason_codes for i in (0, 1))
+    assert_integrity(text, result)
+
+
+def test_heading_group_does_not_reach_across_a_blank_line():
+    """清单末项与下一节题头之间隔着空行时不组成题头组，下一节题头单独作小节检查。"""
+    parts = ["🦪️🍤农贸市场篇", "南山海鲜市场", "团岛农贸市场", "小鲍岛农贸市场\n", "🦪️🍤大集篇",
+             "李村大集：每逢农历二、七开集", "沙子口大集：每逢农历五、十为集", "王哥庄大集：每逢农历四、九为集"]
+    text, result = run(parts)
+    codes = result.gap_decisions[3].reason_codes
+    assert "inside_section_heading" not in codes
+    assert any(code.startswith("section_heading_") or code == "selected_section_heading" for code in codes)
+    assert_integrity(text, result)
+
+
+def test_marked_heading_keeps_its_first_entry_across_a_blank_line():
+    """带标记的栏目题头与其下第一项之间隔着空行时仍组成题头组，栏目整体确认为小节。"""
+    parts = ["这几个景点都值得去。", "按需选择就好。", "🦞4家必吃地道美食｜本地人认证\n", "😋海燕奶奶海鲜锅贴",
+             "地道青岛美食，本地人常去。", "锅贴皮脆馅多，一口爆汁。"]
+    text, result = run(parts)
+    assert "selected_section_heading" in result.gap_decisions[1].reason_codes
+    assert_integrity(text, result)
+
+
+def test_line_under_a_short_numbered_stop_title_is_its_body_not_a_new_section():
+    """“1.大珠山📍山川路｜40元｜07:30-17:00”这类同形站点标题无句内标点，不是清单内容；其下一行是正文。"""
+    parts = ["第三天去山里。", "带娃也能爬。", "1.大珠山📍山川路｜40元｜07:30-17:00", "登顶俯瞰西海岸海岸线",
+             "2.琅琊台📍琅琊镇｜50元｜08:00-17:30", "秦始皇东巡遗址，可以讲历史故事。"]
+    text, result = run(parts)
+    assert "selected_section_heading" not in result.gap_decisions[2].reason_codes
+    assert_integrity(text, result)
+
+
+def test_photo_credit_line_is_not_a_section_title():
+    """“图片来自大众点评网友@……”是图片署名，不作独立小节标题。"""
+    parts = ["这家炸串很有名。", "地址：登州支路", "图片来自大众点评网友@小踢踢", "面糊裹得很薄，外皮脆脆的。", "酱汁也很好吃。"]
+    text, result = run(parts)
+    assert "section_heading_item_line" in result.gap_decisions[1].reason_codes
+    assert_integrity(text, result)
+
+
+def test_blank_lines_between_every_line_do_not_mark_paragraph_ends():
+    """全帖每行之间都隔空行时，空行不说明前文已结束，无句末标点的短行之后的纯文字行不作小节。"""
+    parts = ["今天去了海边\n", "风很大\n", "海边散步\n", "沙子很细，水也很清。\n", "傍晚的光线最好。"]
+    text, result = run(parts)
     assert not any("selected_section_heading" in trace.reason_codes for trace in result.gap_decisions)
     assert_integrity(text, result)

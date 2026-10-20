@@ -28,9 +28,10 @@ from .semantic_meaning import MeaningPartition, partition_by_meaning
 # 新增切点按以下优先顺序归类，取首个命中的理由；撤销切点同理。撤销类中的
 # not_nominated 表示该处在新规则下没有任何提名（多为旧运行的长度补切或标签上移
 # 切点，随其他切点变化后不再需要）。
-_ADDED_CLASSES = ("selected_section_heading", "selected_day_transition", "selected_before_label_heading",
-                  "selected_length_fallback", "selected_local_semantic")
-_REMOVED_CLASSES = ("merged_heading_only_segment", "merged_section_closure", "merged_short_first_segment",
+_ADDED_CLASSES = ("selected_section_heading", "selected_day_transition", "selected_moved_boundary",
+                  "selected_before_label_heading", "selected_length_fallback", "selected_local_semantic")
+_REMOVED_CLASSES = ("moved_before_heading", "moved_after_item_parameters", "moved_after_closing_sentence",
+                    "merged_trailing_parameters", "section_heading_subsection", "merged_heading_only_segment", "merged_section_closure", "merged_short_first_segment",
                     "merged_short_last_segment", "merged_wordless_segment", "rejected_inside_coherent_block",
                     "rejected_open_contrast_or_reason", "rejected_structure_below_valley",
                     "rejected_section_dependency", "rejected_semantic_dependency",
