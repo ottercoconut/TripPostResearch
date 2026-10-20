@@ -34,6 +34,8 @@ manual_review 3,036条。配对`candidate-manifest.json`及当前指针绑定实
 指定的整包，修改该指针不会切换Admin。新算法复用表结构，在新目录生成新的数据库文件。
 完整来源核验、单表字段与调用方式见[模块接入说明](../../docs/protocols/客观文本切分模块接入.md)。
 
+该客观包已由语义切分替代。切分阶段最终版的单表包为`text-segments-semantic-1.3.1-20261020/`（`semantic-coherent-ugc-1.3.1`，10,914帖、42,637段，batch `c0c4a94f…`），同结构五文件，2026年10月20日起为TripPostAdmin活动分段包。同目录的1.2、1.3语义包只作追溯，不再发布。运行身份、验收与切换证据见[总备忘录B05](../../docs/planning/研究问题与待办总备忘录.md#b05embedding自然语义分段与工程接入)。
+
 生成入口为 `scripts/cleaning_snapshot_topic_relevant.py`；源库路径通过
 `--source-db` 显式传入，新输出由 `--output-db` 指定。只读单事务保证包含已提交WAL
 的一致性读取；验收后才原子更新指针，拒绝覆盖已存在的快照和manifest。
