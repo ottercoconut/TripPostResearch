@@ -27,6 +27,8 @@ __pycache__/
 # Run results, models, reports and local exports
 /results/*
 !/results/README.md
+# Local full versions of reports quote raw UGC; only the de-identified versions are tracked
+*（本地完整版）.md
 *.ckpt
 *.pt
 *.pth
