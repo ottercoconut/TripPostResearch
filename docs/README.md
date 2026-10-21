@@ -44,6 +44,7 @@
 - [`data-dictionary/编码簿_青岛旅游UGC编码框架.md`](data-dictionary/编码簿_青岛旅游UGC编码框架.md)：内容按v3.21.0及embedding-semantic-20261011决定，身份按role-weighted-split-20261010及采集阶段口径执行；平台和旧导出仍未迁移。
 - [`data-dictionary/编码维度主观性评定报告.md`](data-dictionary/编码维度主观性评定报告.md)：V0相关解释`NEEDS_UPDATE`，主观性、层级关系与重叠风险正文保留原基线。
 - [`data-dictionary/编码表与BERT学习的对应关系.md`](data-dictionary/编码表与BERT学习的对应关系.md)：V0角色解释`NEEDS_UPDATE`；V3—V6逐字段学习映射不受本轮影响。
+- [`data-dictionary/不同大模型试编码的发现.md`](data-dictionary/不同大模型试编码的发现.md)：`CURRENT_ALIGNED`，去敏版。10月21日Claude与DeepSeek按v3.21.0各自独立编码同一批100篇Post后的发现：逐字段模型间κ、六处规则边界问题、过程问题与案例；不是人工信度证据，不修改编码表。含原文的完整版只在本地同目录，不进Git；事项记录见总备忘录B07。
 - [`methods/BERT多头多标签编码框架设计说明.md`](methods/BERT多头多标签编码框架设计说明.md)：V0角色解释`NEEDS_UPDATE`；文本模型监督结构与冻结门不受本轮影响。
 - [`methods/文本片段切分标准设计报告.md`](methods/文本片段切分标准设计报告.md)：当前embedding自然语义切分决定及规范／协议入口；旧v3.16确定性设计正文仅供历史追溯。
 - [`methods/结构化内容分析编码表设计审计与实施说明.md`](methods/结构化内容分析编码表设计审计与实施说明.md)：方法原则、修订闭环与实施审计。
