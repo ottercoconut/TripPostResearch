@@ -49,12 +49,17 @@ def test_research_label_template_uses_v3_6_atomic_field_contract() -> None:
 
 
 def test_research_label_template_alignment_version_matches_canonical() -> None:
-    """编码表升版后，标注说明必须在同一变更中确认模板对齐状态。"""
+    """编码表升版后，标注说明必须在同一变更中确认模板对齐状态。
+
+    编码表标题可能是规范版本（例如 V0 规则变化时的 v3.25.0），
+    而通用长表对齐的是 V1—V11 内容标签基线。这里优先读取显式基线行，
+    不回退到标题版本，避免规范版本与内容基线混淆。
+    """
 
     canonical_text = CANONICAL_CODEBOOK.read_text(encoding="utf-8")
     annotation_text = ANNOTATION_README.read_text(encoding="utf-8")
     canonical_version = _required_version(
-        r"^# 编码表 v(?P<version>\d+\.\d+\.\d+)$",
+        r"^> \*\*V1—V11内容标签基线\*\*：`v(?P<version>\d+\.\d+\.\d+)`$",
         canonical_text,
         CANONICAL_CODEBOOK,
     )
