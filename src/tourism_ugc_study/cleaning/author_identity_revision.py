@@ -8,6 +8,10 @@
 身份恢复值只取指定列和指定 JSON 键。``updated_at``、``author_profile_url``
 以及其他列、其他表保持复制进来的来源原值，避免把身份库里不同的正文或
 ``content_detail_source`` 等字段带进研究副本。
+
+``drop_unresolved`` 为真时，同一事务在替换之后删除仍无法恢复的帖子，以及
+``web_post_images``、``post_detail_repair_waivers`` 中指向这些帖的行。提交后
+执行 ``VACUUM``，被删正文不得留在空闲页。为假时不删除、也不做这次重建。
 """
 
 from __future__ import annotations
@@ -32,9 +36,14 @@ _MUTABLE_COLUMNS = (
     "raw_sample_json",
 )
 _REQUIRED_COLUMNS = (
+    "id",
     "platform_key",
     "platform_post_id",
     *_MUTABLE_COLUMNS,
+)
+_RELATED_TABLES = (
+    ("web_post_images", "web_post_id"),
+    ("post_detail_repair_waivers", "web_post_id"),
 )
 _HASH_RE = re.compile(r"^[0-9a-f]{16}$")
 _AUTHOR_JSON_KEYS = frozenset({"creator_hash", "nickname"})
@@ -78,6 +87,7 @@ def derive_author_identity_revision(
     revision_id: str,
     reason: str,
     code_commit: str,
+    drop_unresolved: bool = False,
 ) -> dict[str, Any]:
     """复制来源库并在副本上恢复可核对的作者身份，成功后写出 manifest。
 
@@ -89,10 +99,13 @@ def derive_author_identity_revision(
         revision_id: 本次派生标识，写入清单，不复用原冻结 ID。
         reason: 修订原因，原样写入清单。
         code_commit: 执行时的代码 commit。调用方负责从版本库读取。
+        drop_unresolved: 为真时从副本删除 ``absent`` 与 ``still_masked`` 的帖子
+            及其图片、详情豁免，提交后 ``VACUUM``。为假时保留这些行。
 
     Returns:
         已写入磁盘的 manifest 对象。状态固定为 ``DERIVED_NOT_FROZEN``。
-        其中没有昵称或平台用户 ID；未替换帖的平台和帖子 ID 在旁路 JSON 中。
+        其中没有昵称或平台用户 ID。未替换帖的平台、帖子 ID 和 ``web_posts.id``
+        在旁路 JSON 中。开启删除时清单另有删除计数和 ``drop_unresolved: true``。
 
     Raises:
         FileExistsError: 输出、manifest、未替换清单或对应临时文件已经存在。
@@ -103,6 +116,7 @@ def derive_author_identity_revision(
 
     失败时删除本次创建的临时文件和尚未完整发布的输出，不修改来源与身份库的
     字节、权限或标志。成功时输出版本权限为 ``0400``，不设置 ``uchg``。
+    不写冻结登记或 ``current-*.json``。保留行的 ``id`` 不重新编号。
     """
 
     if not revision_id or not revision_id.strip():
@@ -151,7 +165,12 @@ def derive_author_identity_revision(
         if copied_digest != source_guard[2]:
             raise ValueError("author_identity_copy_hash_mismatch")
 
-        stats, unresolved, validation = _revise_copy(temporary, source_path, identity_index)
+        stats, unresolved, validation, dropped = _revise_copy(
+            temporary,
+            source_path,
+            identity_index,
+            drop_unresolved=drop_unresolved,
+        )
         _assert_input_guard(source_path, source_guard, "source")
         _assert_input_guard(identity_path, identity_guard, "identity_db")
         if _sidecars(source_path):
@@ -177,6 +196,11 @@ def derive_author_identity_revision(
             stats=stats,
             validation=validation,
         )
+        if drop_unresolved:
+            document["drop_unresolved"] = True
+            document["dropped_posts"] = dropped["posts"]
+            document["dropped_images"] = dropped["images"]
+            document["dropped_waivers"] = dropped["waivers"]
         manifest_partial = _write_private_json(manifest_path.parent, document)
         unresolved_partial = _write_private_json(
             manifest_path.parent,
@@ -308,10 +332,17 @@ def _revise_copy(
     temporary: Path,
     source: Path,
     identity_index: Mapping[tuple[str, str], _IdentityPost],
-) -> tuple[dict[str, dict[str, int]], dict[str, list[dict[str, str]]], dict[str, str]]:
-    """在副本事务中替换作者身份，提交后再对照只读来源校验。"""
+    *,
+    drop_unresolved: bool,
+) -> tuple[dict[str, dict[str, int]], dict[str, list[dict[str, Any]]], dict[str, str], dict[str, int]]:
+    """在副本事务中替换作者身份，按需删除未恢复帖，提交后再校验。
+
+    ``VACUUM`` 放在提交之后：SQLite 拒绝在事务里重建数据库，而 ``DELETE``
+    留下的空闲页仍可能含有被删正文。不删除时跳过重建，避免改动既有副本字节。
+    """
 
     connection = _connect_copy(temporary)
+    dropped = {"posts": 0, "images": 0, "waivers": 0}
     try:
         _require_columns(connection, "source_copy")
         mode = connection.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
@@ -319,15 +350,30 @@ def _revise_copy(
             raise ValueError("author_identity_journal_mode_failed")
         connection.execute("PRAGMA foreign_keys=ON").fetchall()
         stats = _empty_stats()
-        unresolved: dict[str, list[dict[str, str]]] = {"absent": [], "still_masked": []}
+        unresolved: dict[str, list[dict[str, Any]]] = {"absent": [], "still_masked": []}
         connection.execute("BEGIN IMMEDIATE")
+        dropped_ids: list[int] = []
         try:
             _replace_authors(connection, identity_index, stats, unresolved)
+            if drop_unresolved:
+                dropped_ids = [
+                    int(item["source_post_id"])
+                    for item in (*unresolved["absent"], *unresolved["still_masked"])
+                ]
+                dropped = _drop_unresolved_posts(connection, dropped_ids)
             connection.execute("COMMIT")
         except Exception:
             connection.execute("ROLLBACK")
             raise
-        validation = _validate_copy(connection, source)
+        if drop_unresolved:
+            connection.execute("VACUUM")
+            _assert_no_sidecars(temporary)
+        validation = _validate_copy(
+            connection,
+            source,
+            drop_unresolved=drop_unresolved,
+            dropped_ids=dropped_ids if drop_unresolved else None,
+        )
     finally:
         connection.close()
     for item in stats.values():
@@ -335,21 +381,25 @@ def _revise_copy(
             item["replaced"] + item["still_masked"] + item["absent"]
         ):
             raise ValueError("author_identity_count_inconsistent")
-    return stats, unresolved, validation
+    if drop_unresolved and dropped["posts"] != (
+        sum(item["still_masked"] + item["absent"] for item in stats.values())
+    ):
+        raise ValueError("author_identity_drop_count_mismatch")
+    return stats, unresolved, validation, dropped
 
 
 def _replace_authors(
     connection: sqlite3.Connection,
     identity_index: Mapping[tuple[str, str], _IdentityPost],
     stats: dict[str, dict[str, int]],
-    unresolved: dict[str, list[dict[str, str]]],
+    unresolved: dict[str, list[dict[str, Any]]],
 ) -> None:
     """按帖子键决定缺席、仍脱敏或替换。哈希不符时让整个事务回滚。"""
 
     # sqlite3.Row 不能用键名 rowid 取值，所以查询里改成 stored_rowid。
     rows = connection.execute(
         """
-        SELECT rowid AS stored_rowid, platform_key, platform_post_id, author_platform_id,
+        SELECT id, rowid AS stored_rowid, platform_key, platform_post_id, author_platform_id,
                author_display_name, author_json, raw_sample_json
         FROM web_posts
         WHERE platform_key IN ('weibo', 'douyin', 'zhihu')
@@ -365,15 +415,20 @@ def _replace_authors(
         platform, post_id = key
         stats[platform]["rows"] += 1
         identity = identity_index.get(key)
+        record = {
+            "platform_key": platform,
+            "platform_post_id": post_id,
+            "source_post_id": _source_post_id(row["id"]),
+        }
         if identity is None:
             stats[platform]["absent"] += 1
-            unresolved["absent"].append({"platform_key": platform, "platform_post_id": post_id})
+            unresolved["absent"].append(record)
             continue
         # 先识别“身份库也还没恢复”的行。旧哈希再拿去 sha256 不会等于自身，
         # 如果倒过来先做哈希核对，未恢复行会把整次运行打成失败。
         if _is_still_masked(identity, row["author_platform_id"]):
             stats[platform]["still_masked"] += 1
-            unresolved["still_masked"].append({"platform_key": platform, "platform_post_id": post_id})
+            unresolved["still_masked"].append(record)
             continue
         new_id = identity.author_platform_id
         if _author_id_digest(new_id) != row["author_platform_id"]:
@@ -399,7 +454,48 @@ def _replace_authors(
     unresolved["still_masked"].sort(key=_post_sort_key)
 
 
-def _validate_copy(connection: sqlite3.Connection, source: Path) -> dict[str, str]:
+def _drop_unresolved_posts(connection: sqlite3.Connection, post_ids: list[int]) -> dict[str, int]:
+    """删除未恢复帖及指向它们的图片和详情豁免。
+
+    外键已经打开。先删子表，否则删除 ``web_posts`` 会在语句结束时因仍被引用而回滚。
+    表不存在时记 0；帖子删除数必须等于待删 ID 数，避免漏删后仍去发布。
+    """
+
+    if len(post_ids) != len(set(post_ids)):
+        raise ValueError("author_identity_drop_id_duplicate")
+    images = _delete_ids(connection, "web_post_images", "web_post_id", post_ids)
+    waivers = _delete_ids(connection, "post_detail_repair_waivers", "web_post_id", post_ids)
+    posts = _delete_ids(connection, "web_posts", "id", post_ids)
+    if posts != len(post_ids):
+        raise ValueError("author_identity_drop_count_mismatch")
+    return {"posts": posts, "images": images, "waivers": waivers}
+
+
+def _delete_ids(connection: sqlite3.Connection, table: str, column: str, ids: list[int]) -> int:
+    """按列删除命中行。表不存在则视为没有关联行，不创建表。"""
+
+    if not ids or not _table_exists(connection, table):
+        return 0
+    if column not in set(_column_names(connection, "main", table)):
+        raise ValueError("author_identity_related_column_missing:" + table + ":" + column)
+    quoted = _quote(table)
+    before = connection.execute(f"SELECT count(*) FROM {quoted}").fetchone()[0]
+    placeholders = ",".join("?" * len(ids))
+    connection.execute(
+        f"DELETE FROM {quoted} WHERE {_quote(column)} IN ({placeholders})",
+        ids,
+    )
+    after = connection.execute(f"SELECT count(*) FROM {quoted}").fetchone()[0]
+    return int(before - after)
+
+
+def _validate_copy(
+    connection: sqlite3.Connection,
+    source: Path,
+    *,
+    drop_unresolved: bool,
+    dropped_ids: list[int] | None,
+) -> dict[str, str]:
     """对照 immutable 来源核对副本。任一差异都拒绝发布。"""
 
     quick = [row[0] for row in connection.execute("PRAGMA quick_check").fetchall()]
@@ -411,35 +507,59 @@ def _validate_copy(connection: sqlite3.Connection, source: Path) -> dict[str, st
     source_uri = source.resolve().as_uri() + "?mode=ro&immutable=1"
     connection.execute("ATTACH DATABASE ? AS src", (source_uri,))
     try:
-        _assert_other_tables_identical(connection)
-        _assert_web_posts_preserved(connection)
+        if drop_unresolved:
+            _assert_other_tables_identical(
+                connection,
+                skip=frozenset(table for table, _column in _RELATED_TABLES),
+            )
+            _assert_web_posts_preserved(connection, dropped_ids=dropped_ids or [])
+            _assert_related_tables_without_dropped_posts(connection, dropped_ids or [])
+            _assert_no_unresolved_masked_rows(connection)
+        else:
+            _assert_other_tables_identical(connection, skip=frozenset())
+            _assert_web_posts_preserved(connection, dropped_ids=None)
     finally:
         connection.execute("DETACH DATABASE src")
     mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
     if str(mode).lower() != "delete":
         raise ValueError("author_identity_journal_mode_failed")
+    if not drop_unresolved:
+        return {
+            "quick_check": "ok",
+            "foreign_key_check": "passed",
+            "other_tables_bidirectional_except": "empty",
+            "other_tables_row_counts": "equal",
+            "web_posts_row_count": "equal",
+            "web_posts_non_author_columns": "equal",
+            "json_diff_keys": "allowed",
+            "changed_row_rehash": "passed",
+            "journal_mode": "delete",
+        }
     return {
         "quick_check": "ok",
         "foreign_key_check": "passed",
         "other_tables_bidirectional_except": "empty",
         "other_tables_row_counts": "equal",
-        "web_posts_row_count": "equal",
-        "web_posts_non_author_columns": "equal",
+        "web_posts_row_count": "source_minus_dropped",
+        "web_posts_non_author_columns": "kept_rows_equal",
+        "related_tables_without_dropped_posts": "equal",
+        "unresolved_masked_rows": "none",
         "json_diff_keys": "allowed",
         "changed_row_rehash": "passed",
         "journal_mode": "delete",
+        "vacuum": "completed",
     }
 
 
-def _assert_other_tables_identical(connection: sqlite3.Connection) -> None:
-    """除 web_posts 外，主库与只读来源的用户表必须双向差集为空且行数相同。"""
+def _assert_other_tables_identical(connection: sqlite3.Connection, *, skip: frozenset[str]) -> None:
+    """除 web_posts 和调用方另行核对的表外，用户表必须双向差集为空且行数相同。"""
 
     main_tables = _user_tables(connection, "main")
     source_tables = _user_tables(connection, "src")
     if main_tables != source_tables:
         raise ValueError("author_identity_table_set_mismatch")
     for name in main_tables:
-        if name == "web_posts":
+        if name == "web_posts" or name in skip:
             continue
         quoted = _quote(name)
         main_count = connection.execute(f"SELECT count(*) FROM main.{quoted}").fetchone()[0]
@@ -454,20 +574,42 @@ def _assert_other_tables_identical(connection: sqlite3.Connection) -> None:
                 raise ValueError("author_identity_table_diff:" + name)
 
 
-def _assert_web_posts_preserved(connection: sqlite3.Connection) -> None:
-    """web_posts 只允许四列变化；JSON 变化不能波及作者键以外的内容。"""
+def _assert_web_posts_preserved(connection: sqlite3.Connection, *, dropped_ids: list[int] | None) -> None:
+    """web_posts 只允许四列变化；JSON 变化不能波及作者键以外的内容。
+
+    ``dropped_ids`` 为 None 表示未开启删除，行数必须与来源相同。给出列表时，
+    行数等于来源减去该列表长度，且这些 ``id`` 不得留在副本中。非作者列只比较保留行。
+    """
 
     main_count = connection.execute("SELECT count(*) FROM main.web_posts").fetchone()[0]
     source_count = connection.execute("SELECT count(*) FROM src.web_posts").fetchone()[0]
-    if main_count != source_count:
-        raise ValueError("author_identity_web_posts_count_mismatch")
+    if dropped_ids is None:
+        if main_count != source_count:
+            raise ValueError("author_identity_web_posts_count_mismatch")
+        source_stable = "SELECT {fields} FROM src.web_posts"
+    else:
+        if main_count != source_count - len(dropped_ids):
+            raise ValueError("author_identity_web_posts_count_mismatch")
+        if dropped_ids:
+            placeholders = ",".join("?" * len(dropped_ids))
+            leftover = connection.execute(
+                f"SELECT count(*) FROM main.web_posts WHERE id IN ({placeholders})",
+                dropped_ids,
+            ).fetchone()[0]
+            if leftover:
+                raise ValueError("author_identity_dropped_post_remains")
+        source_stable = (
+            "SELECT {fields} FROM src.web_posts WHERE id IN (SELECT id FROM main.web_posts)"
+        )
     columns = _column_names(connection, "main", "web_posts")
     stable = [name for name in columns if name not in _MUTABLE_COLUMNS]
     if stable:
         fields = ", ".join(_quote(name) for name in stable)
+        main_stable = f"SELECT {fields} FROM main.web_posts"
+        compared = source_stable.format(fields=fields)
         for statement in (
-            f"SELECT {fields} FROM main.web_posts EXCEPT SELECT {fields} FROM src.web_posts",
-            f"SELECT {fields} FROM src.web_posts EXCEPT SELECT {fields} FROM main.web_posts",
+            f"{main_stable} EXCEPT {compared}",
+            f"{compared} EXCEPT {main_stable}",
         ):
             if connection.execute(statement).fetchall():
                 raise ValueError("author_identity_non_author_column_diff")
@@ -501,6 +643,68 @@ def _assert_web_posts_preserved(connection: sqlite3.Connection) -> None:
         removable = frozenset({"nickname"}) if platform == "zhihu" else frozenset()
         if not _json_text_diff_allowed(old_raw, new_raw, value_keys=raw_keys, removable_keys=removable):
             raise ValueError("author_identity_json_diff_forbidden")
+
+
+def _assert_related_tables_without_dropped_posts(connection: sqlite3.Connection, dropped_ids: list[int]) -> None:
+    """图片和豁免只少掉被删帖的关联行，保留行的每一列与来源相同。"""
+
+    for table, column in _RELATED_TABLES:
+        if not _table_exists(connection, table):
+            continue
+        if column not in set(_column_names(connection, "main", table)):
+            raise ValueError("author_identity_related_column_missing:" + table + ":" + column)
+        quoted = _quote(table)
+        quoted_column = _quote(column)
+        params: list[int] = []
+        where = "1"
+        if dropped_ids:
+            placeholders = ",".join("?" * len(dropped_ids))
+            where = f"({quoted_column} IS NULL OR {quoted_column} NOT IN ({placeholders}))"
+            params = list(dropped_ids)
+        main_count = connection.execute(f"SELECT count(*) FROM main.{quoted}").fetchone()[0]
+        kept_count = connection.execute(
+            f"SELECT count(*) FROM src.{quoted} WHERE {where}",
+            params,
+        ).fetchone()[0]
+        if main_count != kept_count:
+            raise ValueError("author_identity_related_table_count:" + table)
+        for statement in (
+            f"SELECT * FROM main.{quoted} EXCEPT SELECT * FROM src.{quoted} WHERE {where}",
+            f"SELECT * FROM src.{quoted} WHERE {where} EXCEPT SELECT * FROM main.{quoted}",
+        ):
+            if connection.execute(statement, params).fetchall():
+                raise ValueError("author_identity_related_table_diff:" + table)
+
+
+def _assert_no_unresolved_masked_rows(connection: sqlite3.Connection) -> None:
+    """删除之后，三平台不得再留下旧哈希加脱敏昵称的行。"""
+
+    rows = connection.execute(
+        """
+        SELECT platform_key, author_platform_id, author_display_name
+        FROM web_posts
+        WHERE platform_key IN ('weibo', 'douyin', 'zhihu')
+        """
+    )
+    for row in rows:
+        if _is_candidate(row["platform_key"], row["author_platform_id"], row["author_display_name"]):
+            raise ValueError("author_identity_unresolved_row_remains")
+
+
+def _table_exists(connection: sqlite3.Connection, name: str) -> bool:
+    row = connection.execute(
+        "SELECT 1 FROM main.sqlite_master WHERE type = 'table' AND name = ?",
+        (name,),
+    ).fetchone()
+    return row is not None
+
+
+def _source_post_id(value: Any) -> int:
+    """未恢复清单只用 ``web_posts.id``。布尔值在 Python 里是 int 的子类，不能当成帖子 ID。"""
+
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("author_identity_source_post_id_invalid")
+    return value
 
 
 def _manifest_document(
@@ -722,8 +926,8 @@ def _post_key(platform: Any, post_id: Any) -> tuple[str, str] | None:
     return None
 
 
-def _post_sort_key(item: Mapping[str, str]) -> tuple[str, str]:
-    return item["platform_key"], item["platform_post_id"]
+def _post_sort_key(item: Mapping[str, Any]) -> tuple[str, str]:
+    return str(item["platform_key"]), str(item["platform_post_id"])
 
 
 def _empty_stats() -> dict[str, dict[str, int]]:

@@ -26,6 +26,11 @@ def main() -> None:
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--revision-id", required=True)
     parser.add_argument("--reason", required=True)
+    parser.add_argument(
+        "--drop-unresolved",
+        action="store_true",
+        help="删除仍无法恢复实名的帖子及其图片、详情豁免",
+    )
     args = parser.parse_args()
     repo = Path(__file__).resolve().parents[1]
     code_commit = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
@@ -38,6 +43,7 @@ def main() -> None:
             revision_id=args.revision_id,
             reason=args.reason,
             code_commit=code_commit,
+            drop_unresolved=args.drop_unresolved,
         )
     except (OSError, ValueError, FileExistsError, sqlite3.Error) as exc:
         print(str(exc), file=sys.stderr)
