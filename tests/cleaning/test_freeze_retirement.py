@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from tourism_ugc_study.cleaning.freeze_retirement import retire_freeze
+from tourism_ugc_study.cleaning.freeze_retirement import _json_style, _publish_styled_json, retire_freeze
 from tourism_ugc_study.cleaning.research_freeze import verify_freeze
 from tourism_ugc_study.cleaning.source_snapshot import file_sha256
 
@@ -711,3 +711,81 @@ def test_cli_dry_run_and_rejected_confirm(tmp_path: Path) -> None:
     assert rejected.returncode == 1
     assert "confirm_mismatch" in rejected.stderr
     assert _sha(world.records) == before
+
+
+def _assert_json_roundtrip(path: Path, text: str, *, indent: int | None, separators: tuple[str, str]) -> None:
+    """写回未改动的 JSON。字节必须相同，且不得替换文件。"""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    before = path.stat()
+    style = _json_style(text)
+    assert style["indent"] == indent
+    assert style["separators"] == separators
+    assert style["trailing_newline"] is text.endswith("\n")
+    _publish_styled_json(path, text, json.loads(text))
+    after = path.stat()
+    assert path.read_text(encoding="utf-8") == text
+    assert after.st_ino == before.st_ino
+    assert after.st_mtime_ns == before.st_mtime_ns
+
+
+def test_indented_json_roundtrip_does_not_rewrite(tmp_path: Path) -> None:
+    """缩进 JSON 经样式识别写回时字节不变，也不落盘。"""
+
+    list_text = [{"地名": "桂林", "source_post_id": 3}, {"地名": "阳朔", "source_post_id": 4}]
+    dict_text = {"批次": "甲", "帖子": [{"source_post_id": 3, "说明": "无目标"}]}
+    samples = [
+        (list_text, 2, False, True),
+        (dict_text, 2, False, False),
+        (list_text, 2, True, False),
+        ({"说明": "阳朔", "条目": [3, 4], "状态": "保留"}, 4, True, True),
+    ]
+    for index, (payload, indent, ensure_ascii, trailing) in enumerate(samples):
+        text = json.dumps(payload, ensure_ascii=ensure_ascii, indent=indent)
+        if trailing:
+            text += "\n"
+        assert _json_style(text)["ensure_ascii"] is ensure_ascii
+        _assert_json_roundtrip(
+            tmp_path / f"styled-{index}.json",
+            text,
+            indent=indent,
+            separators=(",", ": "),
+        )
+    _assert_json_roundtrip(tmp_path / "compact.json", '{"left":1,"right":2}', indent=None, separators=(",", ":"))
+    _assert_json_roundtrip(
+        tmp_path / "spaced.json",
+        '{"left": 1, "right": 2}',
+        indent=None,
+        separators=(", ", ": "),
+    )
+
+
+def test_untargeted_incremental_and_private_maps_keep_sha(tmp_path: Path) -> None:
+    """没有目标帖的计分记录和私有映射，完整退役后 SHA 不变。"""
+
+    world = _build(tmp_path)
+    scored = world.private_map.parent / "incremental-scored-records.json"
+    manual_map = world.manual_csv.with_name("manual-review-review-private-map.json")
+    _write_json(
+        scored,
+        [
+            {"source_post_id": 3, "embedding_cache_key": _NS + ":" + _SHARED, "备注": "保留"},
+            {"source_post_id": 4, "embedding_cache_key": _NS + ":" + _SHARED, "备注": "同样保留"},
+        ],
+    )
+    _write_json(
+        world.private_map,
+        [{"source_post_id": 3, "task_id": "inf-3", "mark": "桂林"}],
+        ensure_ascii=True,
+    )
+    _write_json(world.keep_map, [{"source_post_id": 3, "task_id": "keep-3", "地名": "阳朔"}])
+    _write_json(manual_map, [{"source_post_id": 4, "task_id": "man-4", "说明": "留下"}])
+    watched = [scored, world.private_map, world.keep_map, manual_map]
+    for path in watched:
+        posts = {item["source_post_id"] for item in json.loads(path.read_text(encoding="utf-8"))}
+        assert posts.isdisjoint({7, 8})
+    before = {path: _sha(path) for path in watched}
+    _run(world)
+    for path, digest in before.items():
+        assert _sha(path) == digest

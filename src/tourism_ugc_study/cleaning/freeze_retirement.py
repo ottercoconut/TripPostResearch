@@ -1642,6 +1642,13 @@ def _publish_styled_json(path: Path, original: str, payload: Any) -> None:
 
 
 def _json_style(text: str) -> dict[str, Any]:
+    """从原文识别缩进、转义和分隔符，使未改动的 JSON 写回时字节不变。
+
+    有缩进时分隔符固定为 ``(",", ": ")``。``json.dumps`` 把条目分隔符写在换行之前；
+    若使用 ``(", ", ": ")``，逗号后的空格会留在每行行尾，没有目标帖的文件也会被改写。
+    没有缩进时才按原文区分紧凑的 ``(",", ":")`` 和带空格的 ``(", ", ": ")``。
+    """
+
     indent: int | str | None = None
     for line in text.splitlines()[1:]:
         if not line.strip():
@@ -1655,9 +1662,10 @@ def _json_style(text: str) -> dict[str, Any]:
             break
     raw_non_ascii = any(ord(char) > 127 for char in text)
     ensure_ascii = (not raw_non_ascii) and "\\u" in text
-    separators = (", ", ": ")
-    if indent is None and ", " not in text and "," in text:
-        separators = (",", ":")
+    if indent is None:
+        separators = (",", ":") if ", " not in text and "," in text else (", ", ": ")
+    else:
+        separators = (",", ": ")
     return {
         "indent": indent,
         "ensure_ascii": ensure_ascii,
