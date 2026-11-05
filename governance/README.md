@@ -4,7 +4,7 @@
 
 当前文件较少，统一平铺并使用明确文件名：`license-strategy.md` 记录许可边界，`release-checklist.md` 记录公开前检查。伦理、隐私、保存期限或平台条款文件在实际形成时直接加入本目录；文件增多后再分类。
 
-`research-data-freezes.json`是无UGC的冻结登记。身份`research-data-20260912`已退役：操作人授权原位删除无法恢复实名的帖子。登记在`scripts/cleaning_retire_freeze.py`成功后改为`RETIRED`，原manifest SHA保留为历史；命令尚未对本机执行时，文件里可能仍写着`FROZEN`。正文、作者身份、媒体路径明细及全文件清单只留Git忽略目录。最终人工研究集尚未发布。见[冻结决定](../docs/decisions/2026-09-12-原始抓取集与清洗候选冻结.md)与[校验协议](../docs/protocols/研究数据冻结与校验.md)。
+`research-data-freezes.json`是无UGC的冻结登记。身份`research-data-20260912`已退役：操作人授权原位删除无法恢复实名的帖子。登记在`scripts/cleaning_retire_freeze.py`成功后改为`RETIRED`，原manifest SHA保留为历史。正文、作者身份、媒体路径明细及全文件清单只留Git忽略目录。最终人工研究集尚未发布。见[冻结决定](../docs/decisions/2026-09-12-原始抓取集与清洗候选冻结.md)与[校验协议](../docs/protocols/研究数据冻结与校验.md)。
 
 内部保全不等于公开许可、永久保存授权或异地备份。纠错或移除材料须由研究者明确授权并记录身份与原因，不通过普通缓存清理隐式销毁。
 
