@@ -85,15 +85,49 @@ def prepare_freeze(workspace: Path, config_path: Path, source_db: Path,
             "manifest_sha256": file_sha256(metadata / "freeze-manifest.json"), "file_count": len(entries)}
 
 
+def _freeze_is_retired(workspace: Path, manifest_path: Path) -> bool:
+    """登记为 RETIRED，或 manifest 已有 retired 块时，冻结复核不再适用。
+
+    退役会改写 manifest，历史 SHA 对不上是预期结果，不能当成文件损坏继续验字节。
+    只匹配本 manifest 的 freeze_id 或登记里的 manifest 相对路径。
+    """
+
+    try:
+        spec = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        spec = None
+    if isinstance(spec, dict) and "retired" in spec:
+        return True
+    registry_path = workspace / "governance/research-data-freezes.json"
+    if not registry_path.is_file():
+        return False
+    try:
+        registry = json.loads(registry_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    freeze_id = spec.get("freeze_id") if isinstance(spec, dict) else None
+    relative = str(manifest_path.relative_to(workspace))
+    for record in registry.get("freezes", []):
+        if not isinstance(record, dict) or record.get("status") != "RETIRED":
+            continue
+        if record.get("freeze_id") == freeze_id or record.get("manifest") == relative:
+            return True
+    return False
+
+
 def verify_freeze(workspace: Path, manifest_path: Path, digest: str,
                   *, require_protection: bool = True) -> dict[str, Any]:
     """从外部可信SHA开始全量复核文件集合、字节和保护；不依赖活跃采集库。
 
     require_protection=False仅用于seal前验收，不得据此宣称FROZEN。跨平台复制可
     验证内容，但没有macOS保护不得返回保护通过。未知契约或元数据附加文件失败。
+    登记状态为 RETIRED，或 manifest 含 retired 块时，直接报错「已退役」，
+    不再核验字节、文件集合或 uchg。
     """
     workspace = workspace.resolve()
     manifest_path = owned_path(workspace, str(manifest_path.absolute().relative_to(workspace)))
+    if _freeze_is_retired(workspace, manifest_path):
+        raise ValueError("已退役")
     spec = load_verified_json(manifest_path, digest)
     if spec["contract"] != "research-data-freeze-v1" or spec["inventory_filename"] != "frozen-files.json":
         raise ValueError("freeze_contract_invalid")
