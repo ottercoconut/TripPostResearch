@@ -53,7 +53,13 @@ def _raw(creator: str, *, platform: str, nickname: str, user_nickname: str | Non
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
-def _create_database(path: Path, rows: list[tuple[object, ...]]) -> None:
+def _create_database(
+    path: Path,
+    rows: list[tuple[object, ...]],
+    *,
+    images: list[tuple[object, ...]] | None = None,
+    waivers: list[tuple[object, ...]] | None = None,
+) -> None:
     with sqlite3.connect(path) as conn:
         conn.executescript(
             """
@@ -82,7 +88,21 @@ def _create_database(path: Path, rows: list[tuple[object, ...]]) -> None:
             """
         )
         conn.executemany("INSERT INTO web_posts VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
-        conn.execute("INSERT INTO web_post_images VALUES(1, 1, 'keep-image')")
+        conn.executemany(
+            "INSERT INTO web_post_images VALUES(?, ?, ?)",
+            [(1, 1, "keep-image")] if images is None else images,
+        )
+        if waivers is not None:
+            conn.execute(
+                """
+                CREATE TABLE post_detail_repair_waivers(
+                    id INTEGER PRIMARY KEY,
+                    web_post_id INTEGER NOT NULL REFERENCES web_posts(id),
+                    reason TEXT NOT NULL
+                )
+                """
+            )
+            conn.executemany("INSERT INTO post_detail_repair_waivers VALUES(?, ?, ?)", waivers)
 
 
 def _source_rows() -> list[tuple[object, ...]]:
@@ -166,7 +186,7 @@ def _fixtures(directory: Path) -> tuple[Path, Path, bytes, bytes]:
     return source, identity, source.read_bytes(), identity.read_bytes()
 
 
-def _derive(directory: Path, source: Path, identity: Path) -> dict[str, object]:
+def _derive(directory: Path, source: Path, identity: Path, *, drop_unresolved: bool = False) -> dict[str, object]:
     return derive_author_identity_revision(
         source,
         identity,
@@ -175,7 +195,33 @@ def _derive(directory: Path, source: Path, identity: Path) -> dict[str, object]:
         revision_id="rev-test-1",
         reason="synthetic-author-revision",
         code_commit="test-commit",
+        drop_unresolved=drop_unresolved,
     )
+
+
+def _rich_fixtures(directory: Path) -> tuple[Path, Path, bytes, bytes]:
+    """在默认合成库上补被删帖的图片和豁免，用来区分保留行与关联行。"""
+
+    source = directory / "source.sqlite"
+    identity = directory / "identity.sqlite"
+    _create_database(
+        source,
+        _source_rows(),
+        images=[
+            (1, 1, "keep-image"),
+            (2, 3, "image-of-absent"),
+            (3, 5, "image-of-masked"),
+            (4, 6, "keep-zhihu-image"),
+        ],
+        waivers=[
+            (1, 3, "waiver-of-absent-post"),
+            (2, 6, "waiver-of-kept-post"),
+        ],
+    )
+    _create_database(identity, _identity_rows())
+    os.chmod(source, 0o444)
+    os.chmod(identity, 0o400)
+    return source, identity, source.read_bytes(), identity.read_bytes()
 
 
 def test_derives_masked_authors_without_inheriting_source_permissions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -215,8 +261,14 @@ def test_derives_masked_authors_without_inheriting_source_permissions(tmp_path: 
     for secret in (SECRET_NICK, SECRET_UID, "张小三", "王五五", "知乎用户甲"):
         assert secret not in manifest_text
         assert secret not in unresolved_text
-    assert unresolved["absent"] == [{"platform_key": "weibo", "platform_post_id": "post-weibo-absent"}]
-    assert unresolved["still_masked"] == [{"platform_key": "douyin", "platform_post_id": "post-douyin-masked"}]
+    assert "drop_unresolved" not in manifest
+    assert "dropped_posts" not in manifest
+    assert unresolved["absent"] == [
+        {"platform_key": "weibo", "platform_post_id": "post-weibo-absent", "source_post_id": 3}
+    ]
+    assert unresolved["still_masked"] == [
+        {"platform_key": "douyin", "platform_post_id": "post-douyin-masked", "source_post_id": 5}
+    ]
 
     with sqlite3.connect(output.as_uri() + "?mode=ro", uri=True) as conn:
         assert conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
@@ -344,3 +396,135 @@ def test_script_writes_commit_and_derived_status(tmp_path: Path) -> None:
     assert stored["status"] == "DERIVED_NOT_FROZEN"
     assert SECRET_NICK not in manifest.read_text()
     assert SECRET_UID not in completed.stdout
+
+
+def test_without_drop_unresolved_keeps_masked_posts_and_related_rows(tmp_path: Path) -> None:
+    """不开启删除时，未恢复帖、图片和豁免都留在副本里，来源字节与权限不变。"""
+
+    source, identity, source_bytes, identity_bytes = _rich_fixtures(tmp_path)
+    source_mode = source.stat().st_mode
+    source_flags = getattr(source.stat(), "st_flags", 0)
+    result = _derive(tmp_path, source, identity, drop_unresolved=False)
+    output = tmp_path / "derived.sqlite"
+
+    assert source.read_bytes() == source_bytes
+    assert identity.read_bytes() == identity_bytes
+    assert source.stat().st_mode == source_mode
+    assert getattr(source.stat(), "st_flags", 0) == source_flags
+    assert "drop_unresolved" not in result
+    assert "dropped_posts" not in result
+    with sqlite3.connect(output.as_uri() + "?mode=ro", uri=True) as conn:
+        assert [row[0] for row in conn.execute("SELECT id FROM web_posts ORDER BY id")] == [1, 2, 3, 4, 5, 6, 7]
+        absent = conn.execute(
+            "SELECT author_platform_id, author_display_name, content_text FROM web_posts WHERE id=3"
+        ).fetchone()
+        assert absent == (_digest("weibo-user-absent"), _mask("缺席人"), "无人认领")
+        masked = conn.execute(
+            "SELECT author_platform_id, author_display_name FROM web_posts WHERE id=5"
+        ).fetchone()
+        assert masked == (_digest("douyin-user-masked"), "*")
+        assert conn.execute("SELECT id, web_post_id, image_url FROM web_post_images ORDER BY id").fetchall() == [
+            (1, 1, "keep-image"),
+            (2, 3, "image-of-absent"),
+            (3, 5, "image-of-masked"),
+            (4, 6, "keep-zhihu-image"),
+        ]
+        assert conn.execute(
+            "SELECT id, web_post_id, reason FROM post_detail_repair_waivers ORDER BY id"
+        ).fetchall() == [
+            (1, 3, "waiver-of-absent-post"),
+            (2, 6, "waiver-of-kept-post"),
+        ]
+
+
+def test_drop_unresolved_removes_related_rows_and_vacuums_deleted_text(tmp_path: Path) -> None:
+    """开启后删除未恢复帖及其关联行，保留行的 id 与非作者列不变，空闲页不再含被删正文。"""
+
+    source, identity, source_bytes, identity_bytes = _rich_fixtures(tmp_path)
+    source_mode = source.stat().st_mode
+    source_flags = getattr(source.stat(), "st_flags", 0)
+    result = _derive(tmp_path, source, identity, drop_unresolved=True)
+    output = tmp_path / "derived.sqlite"
+    manifest_text = (tmp_path / "manifest.json").read_text()
+    unresolved_text = (tmp_path / "unresolved-posts.json").read_text()
+    unresolved = json.loads(unresolved_text)
+
+    assert source.read_bytes() == source_bytes
+    assert identity.read_bytes() == identity_bytes
+    assert source.stat().st_mode == source_mode
+    assert getattr(source.stat(), "st_flags", 0) == source_flags
+    assert (output.stat().st_mode & 0o777) == 0o400
+    assert getattr(output.stat(), "st_flags", 0) & stat.UF_IMMUTABLE == 0
+    assert not any(Path(str(output) + suffix).exists() for suffix in ("-wal", "-shm", "-journal"))
+    assert result["drop_unresolved"] is True
+    assert result["dropped_posts"] == 2
+    assert result["dropped_images"] == 2
+    assert result["dropped_waivers"] == 1
+    assert result["validation"]["vacuum"] == "completed"
+    assert result["validation"]["web_posts_row_count"] == "source_minus_dropped"
+    assert result["validation"]["unresolved_masked_rows"] == "none"
+    assert result["platforms"]["weibo"]["absent"] == 1
+    assert result["platforms"]["douyin"]["still_masked"] == 1
+    for secret in (SECRET_NICK, SECRET_UID, "张小三", "王五五"):
+        assert secret not in manifest_text
+        assert secret not in unresolved_text
+    assert unresolved["absent"] == [
+        {"platform_key": "weibo", "platform_post_id": "post-weibo-absent", "source_post_id": 3}
+    ]
+    assert unresolved["still_masked"] == [
+        {"platform_key": "douyin", "platform_post_id": "post-douyin-masked", "source_post_id": 5}
+    ]
+
+    blob = output.read_bytes()
+    for removed in ("无人认领", "仍脱敏", "image-of-absent", "image-of-masked", "waiver-of-absent-post"):
+        assert removed.encode() not in blob
+    assert "来源正文甲".encode() in blob
+    assert "waiver-of-kept-post".encode() in blob
+
+    with sqlite3.connect(output.as_uri() + "?mode=ro", uri=True) as conn:
+        assert conn.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert [row[0] for row in conn.execute("SELECT id FROM web_posts ORDER BY id")] == [1, 2, 4, 6, 7]
+        kept = {
+            row[0]: row
+            for row in conn.execute(
+                "SELECT id, platform_post_id, author_platform_id, author_display_name, author_profile_url, "
+                "updated_at, content_text FROM web_posts"
+            )
+        }
+        assert kept[1][2:] == ("weibo-user-1001", "张小三", "https://example.test/weibo", "SOURCE-KEPT-WEIBO", "来源正文甲")
+        assert kept[7][1:] == (
+            "post-xhs",
+            "xhs-author",
+            "小红书昵称",
+            "https://example.test/xhs",
+            "SOURCE-KEPT-XHS",
+            "其他平台不动",
+        )
+        assert conn.execute("SELECT id, web_post_id, image_url FROM web_post_images ORDER BY id").fetchall() == [
+            (1, 1, "keep-image"),
+            (4, 6, "keep-zhihu-image"),
+        ]
+        assert conn.execute("SELECT id, web_post_id, reason FROM post_detail_repair_waivers").fetchall() == [
+            (2, 6, "waiver-of-kept-post"),
+        ]
+        masked_rows = conn.execute(
+            """
+            SELECT platform_key, author_platform_id, author_display_name
+            FROM web_posts
+            WHERE platform_key IN ('weibo', 'douyin', 'zhihu')
+            """
+        ).fetchall()
+        assert masked_rows
+        for platform, author_id, display_name in masked_rows:
+            assert not (isinstance(author_id, str) and len(author_id) == 16 and _mask_like(display_name))
+
+
+def _mask_like(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    if value == "*":
+        return True
+    if len(value) == 2 and value[1] == "*":
+        return True
+    return len(value) == 5 and value[1:4] == "***"
