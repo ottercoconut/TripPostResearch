@@ -47,3 +47,17 @@
 - Pull Request 的标题、说明、检查结果和评审回复以简体中文为主。
 - 分支名使用描述实际任务的简短英文小写与连字符，不得包含 `codex`、`agent` 等代理或工具身份字样。
 - 不把无关变更混入同一提交；涉及数据、标注或模型结果时说明对应版本。
+
+<!-- agit:begin -->
+## Session version control (agit)
+
+Use these rules when the user requests an AgentGit operation or `AGIT_SESSION` or
+`AGIT_MERGE_TX` identifies the current managed session. Otherwise continue the
+user's task without agit checks, transcript discovery, or session adoption.
+The working directory and this file alone do not activate AgentGit.
+
+- Inspect `agit status --json` when the requested operation needs session or workspace state. An adopted session still needs an explicit `<owner/repo>@<branch>` or `AGIT_SESSION`; directory bindings and native runtime IDs do not select it.
+- Settle completed phases with `agit commit <owner/repo>@<branch> --milestone "<summary>"` (add `--code` when relevant). Importing a session does not set `AGIT_SESSION` in the calling process.
+- If resumed as a merge agent, follow the `AGIT_MERGE_TX` protocol in the agit skill.
+- Never rebase or force-push AgentGit history; remove context with `agit revert <owner/repo>@<branch>#n.k`. `@` requires `AGIT_SESSION`.
+<!-- agit:end -->
