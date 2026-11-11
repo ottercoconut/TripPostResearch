@@ -5,16 +5,18 @@
 \usepackage{fontspec}
 \usepackage{geometry}
 \geometry{a4paper, top=2.5cm, bottom=2.5cm, left=2.7cm, right=2.7cm}
-\setmainfont{PingFang SC}[
-  BoldFont={PingFang SC Semibold}
-]
-\newfontfamily\enit{texgyretermes}[
-  Path={/Users/a123/Library/TinyTeX/texmf-dist/fonts/opentype/public/tex-gyre/},
-  Extension=.otf,
-  UprightFont=texgyretermes-regular,
-  BoldFont=texgyretermes-bold,
-  ItalicFont=texgyretermes-italic,
-  BoldItalicFont=texgyretermes-bolditalic
+% 字体按本机可用情况选择：Mac 用 PingFang SC，其他机器用 Noto Sans CJK SC。
+% 英文斜体用 TeX Live 自带的 TeX Gyre Termes，按文件名查找，不写本机路径。
+\IfFontExistsTF{PingFang SC}{%
+  \setmainfont{PingFang SC}[BoldFont={PingFang SC Semibold}]%
+}{%
+  % Language 指定简体中文，确保取 SC 字形而不是合集里的日文字形。
+  \setmainfont{Noto Sans CJK SC}[Language=Chinese Simplified, BoldFont={* Bold}]%
+}
+\newfontfamily\enit{texgyretermes-regular.otf}[
+  BoldFont=texgyretermes-bold.otf,
+  ItalicFont=texgyretermes-italic.otf,
+  BoldItalicFont=texgyretermes-bolditalic.otf
 ]
 \XeTeXlinebreaklocale "zh"
 \XeTeXlinebreakskip=0pt plus 0.5pt
@@ -38,19 +40,19 @@
 
 \vspace{0.6em}
 \noindent\textbf{摘要。}
-社交媒体帖子常被直接当作游客目的地形象的替身。本文把帖子看作被生产出来的话语，考察机构账号和个人创作者如何呈现青岛。清洗后，四个平台上与青岛旅游相关的 11,599 篇帖子保留了 10,178 篇与目的地相关的帖子。在 100 篇（476 个片段）的试点中，实用的行程规划信息（占片段的 58\%）多于情感与感官表达（30\%）。核心吸引物得到的评价绝大多数为正向（166 条评价中的 155 条）；价格、服务、拥挤等运营方面则正负相当（20 比 19）。
+社交媒体帖子常被直接当作游客目的地形象的替身。本文把帖子看作被生产出来的话语，而不是静止的认知形象，考察机构账号和个人创作者如何呈现同一个目的地青岛。清洗后，四个平台上与青岛旅游相关的 11,599 篇帖子保留了 10,178 篇与目的地相关的帖子。在 100 篇（476 个片段）的试点中，实用的行程规划信息（占片段的 58\%）多于情感与感官表达（30\%）。核心吸引物得到的评价绝大多数为正向（166 条评价中的 155 条）；价格、服务、可达性和拥挤等运营方面则正负相当（20 比 19）。
 
 \vspace{0.8em}
 \noindent\textbf{关键词：}目的地形象；用户生成内容；内容创作者；内容分析。
 
 \section{背景}
-目的地形象是一个人对某地持有的累积信念和印象，不能还原成内容频次（Tasci, Gartner, \& Cavusgil, 2007）。社交媒体帖子为形象形成提供材料（Gartner, 1994），也可以编码认知属性和情感属性（Garay, 2019），但一篇帖子并不是访客心中的形象。对照官方营销和游客生成内容的研究，大多用词频衡量主题是否出现（Sun, Tang, \& Liu, 2021）。帖子在做什么、评价哪些属性、创作者身份又怎样影响这两点，目前知道得不多。
+目的地形象是一个人对某地持有的累积信念和印象，不能还原成内容频次的简单合计（Tasci, Gartner, \& Cavusgil, 2007）。社交媒体帖子为形象形成提供材料（Gartner, 1994），也可以编码认知属性和情感属性（Garay, 2019），但网上的一篇帖子并不等同于访客内心持有的认知形象。对照官方营销和游客生成内容的研究，大多用词频衡量主题是否出现（Sun, Tang, \& Liu, 2021）。帖子在做什么、评价哪些属性、创作者身份又怎样影响这两点，目前知道得不多。
 
 \section{目的}
 本研究比较机构账号和个人创作者如何表征青岛：他们的内容策略、评价的资源和属性，以及这些要素如何在文本片段中共现。我们的假设是：即便写到的是同一批目的地资源，机构帖子也更稳定地偏向不加批评的推广性表征；个人创作者则在总体正向的叙述里加入实用性的保留、批评或建议。
 
 \section{方法}
-方法是理论导向的结构化内容分析（Krippendorff, 2018）。编码前，帖子正文先被切成各自表达一个完整意思的片段。切分用基于向量的语义切分（Qwen3-Embedding-8B），并受固定的边界规则约束；编码员不改动片段边界。每个片段编码内容策略、所指向的目的地资源、被评价属性，以及评价的方向和强度。账号元数据单独编码，创作者分组标准在任何组间比较之前已经确定。相关性分类器在 1,300 篇人工标注帖子上训练，对四个平台采集的 11,599 篇青岛旅游相关帖子进行筛选，保留 10,178 篇与目的地相关的帖子。两名经过培训的编码员独立编码试点样本（评价方向 \mbox{Cohen's {\enit κ} = 0.82}），分歧通过讨论解决。
+方法是理论导向的结构化内容分析（Krippendorff, 2018）。编码前，帖子正文先被切成各自表达一个完整意思的片段。切分用基于向量的语义切分（Qwen3-Embedding-8B），并受固定的边界规则约束；编码员不改动片段边界。每个片段编码内容策略、所指向的目的地资源、被评价属性，以及评价的方向和强度。账号元数据单独编码，创作者分组标准在任何组间比较之前已经确定。相关性分类器在 1,300 篇人工标注帖子上训练，对四个平台采集的 11,599 篇青岛旅游相关帖子进行筛选，保留 10,178 篇与目的地相关的帖子。两名经过培训的编码员独立编码试点样本（评价方向 \mbox{{\enit Cohen's \textit{κ} = 0.82}}），分歧通过讨论解决。
 
 \section{现阶段结果}
 \noindent\textbf{帖子在做什么。}
@@ -61,7 +63,7 @@
 编码员在 216 条评价上对属性和方向都一致。核心吸引物质量、活动和目的地氛围共 166 条（正向 155，负向 10）。运营因素——价格、服务、设施、可达性、拥挤和管理——共 44 条，正负大致相当（正向 20，负向 19）。
 
 \section{意义}
-正向评价主要落在目的地固有的资源禀赋上，抱怨则集中在可以管理的运营接触点；因此，目的地营销组织（DMO）能据以行动的信号，落在大约五分之一的评价里，而总情感分数会把它盖住。回应会议主题 \mbox{\emph{Shaping Tourism Technology: Hype, Human Centricity and ROI}}：相关性筛选和切分这类大批量步骤交给模型，需要解释判断的部分留给人工编码员。社交聆听工具如果按属性和创作者类型报告评价，而不是只给一个情感分数，就能让 DMO 看清运营投入在哪里有回报。
+正向评价主要落在目的地固有的资源禀赋上，抱怨则集中在可以管理的运营接触点；因此，目的地营销组织（DMO）能据以行动的信号，落在大约五分之一的评价里，而总情感分数会把它盖住。回应会议主题 {\enit\itshape Shaping Tourism Technology: Hype, Human Centricity and ROI}：相关性筛选和切分这类大批量步骤交给模型，需要解释判断的部分留给人工编码员。社交聆听工具如果按属性和创作者类型报告评价，而不是只给一个情感分数，就能让 DMO 看清运营投入在哪里有回报。
 
 \section*{参考文献}
 {\raggedright
