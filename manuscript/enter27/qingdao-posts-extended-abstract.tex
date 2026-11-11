@@ -1,0 +1,68 @@
+% ENTER27 长摘要。正文只收录 Gemini 对话中的英文定稿，不含中文修改说明。
+% Springer LNCS（llncs）。双盲审：不恢复作者姓名与单位。
+% 会议报告类扩展摘要通常限 2 页（含参考文献）。本文件按英文定稿排版，不删节。
+\documentclass[runningheads]{llncs}
+\usepackage[T1]{fontenc}
+\usepackage{newtxtext}
+\usepackage[varvw]{newtxmath}
+
+\begin{document}
+
+\title{Who Represents the Destination, and What Do They Evaluate? Social-Media Posts about Qingdao}
+\titlerunning{Social-Media Posts about Qingdao}
+
+\author{Anonymous Author}
+\authorrunning{Anonymous Author}
+\institute{Author names and affiliations are omitted for double-blind review.}
+
+\maketitle
+
+\begin{abstract}
+Destination marketers and researchers frequently interpret social-media posts as direct proxies for the destination image held by tourists. Conceptualizing posts as produced discourse rather than static cognitive images, this extended abstract examines how institutional accounts and individual creators portray a single destination, Qingdao. We cleaned 19{,}099 posts and retained 10{,}178 for formal use on four platforms, after low-quality Bilibili posts were dropped. In a pilot analysis of 100 posts (476 segments), practical trip-planning information predominated (58\% of segments), whereas affective and sensory expressions were less frequent (30\%). Evaluations of core attractions were overwhelmingly favourable (155 of 166), whereas operational aspects---price, service, accessibility, and crowding---were evenly divided (20 favourable vs.\ 19 unfavourable). The subsequent stage investigates whether institutional and individual creator groups project divergent destination images from identical resources.
+
+\keywords{destination image \and user-generated content \and content creators \and content analysis.}
+\end{abstract}
+
+\section{Background}
+Destination image comprises the cumulative beliefs and impressions an individual holds about a place, which cannot be reduced to simple aggregate content frequencies~\cite{tasci2007}. While social-media posts provide foundational material for image formation~\cite{gartner1994} and can be coded for cognitive and affective attributes~\cite{garay2019}, an online post is not identical to the internal cognitive image held by a visitor. Prior research contrasting official marketing with tourist-generated content has largely focused on thematic presence via word-frequency metrics~\cite{sun2021}. Consequently, less is known about discursive variations in how destinations are represented: what pragmatic functions a post serves, which attributes it evaluates, and how creator identity shapes the narrative.
+
+\section{Purpose}
+This study investigates how institutional accounts and individual creators represent Qingdao by examining their communicative strategies, the specific resources and attributes evaluated, and their co-occurrence within discrete text segments. We hypothesize that, even when depicting identical destination resources, institutional posts consistently lean toward uncritical, promotional representation, whereas individual creators temper generally positive accounts with pragmatic caveats, critiques, or advice.
+
+\section{Method}
+We employ theory-driven structured content analysis~\cite{krippendorff2018}. Segments are produced by semantic segmentation of the post text, and each segment is coded for rhetorical strategy, target destination resource, evaluative attribute, and the valence and intensity of the evaluation. Account metadata are catalogued independently of textual codes, and creator grouping criteria were pre-registered before inspecting comparative group outcomes. Trained on 1{,}300 annotated posts, the cleaning model retained 10{,}178 posts for formal use on four platforms, after low-quality Bilibili posts were dropped. The pilot sample was coded independently by two trained human coders (inter-coder reliability for evaluative direction reached \mbox{Cohen's} $\kappa = 0.82$), with discrepancies resolved through consensus discussions to establish the final labels.
+
+\section{Results to Date}
+\paragraph{Filtering destination-relevant content.}
+Of 19{,}099 cleaned posts, 10{,}178 on four platforms were retained for formal use after low-quality Bilibili posts were dropped. Keyword-matched counts therefore overstate the posts actually used.
+
+\paragraph{What posts do.}
+The pilot sample covers 100 randomly sampled posts across 476 segments. Practical information (itineraries, pricing, how-to advice) appears in 58\% of segments, sensory or emotional rendering in 30\%, background knowledge in 11\%, and calls for interaction in 3\%. Approximately half of the posts convey explicit recommendations.
+
+\paragraph{What posts judge.}
+The two human coders concurred on both the target attribute and evaluative valence across 216 evaluations. Core attraction quality, activities, and destination atmosphere accounted for 166 evaluations (155 favourable vs.\ 10 unfavourable). Conversely, operational factors---price, service, facilities, accessibility, crowding, and management---accounted for 44 evaluations, with sentiment evenly split (20 favourable vs.\ 19 unfavourable).
+
+\paragraph{Where categories blur.}
+The coders diverged most frequently on whether visiting a landmark constitutes an activity versus a sight, and whether specific architectural structures function as scenic sights or service facilities. Consequently, the refined coding codebook explicitly separates scenic architectural attractions from functional hospitality facilities.
+
+\section{Significance}
+For destination marketing organizations (DMOs), this pilot untangles critical operational nuances that aggregate sentiment scores obscure. Favourable evaluations predominantly attach to endowed destination assets, whereas complaints concentrate on manageable operational touchpoints; thus, actionable managerial signals reside within roughly one-fifth of all evaluations. Furthermore, posts function predominantly as pragmatic travel-planning utilities rather than purely affective personal reflections. If subsequent full-sample analysis confirms that individual creators absorb and project operational critiques while institutional accounts omit them, the two cohorts effectively construct divergent destinations from the same underlying resources. Aligned with the conference theme of Hype and Return, our methodology demonstrates where computational automation delivers efficiency and where rigorous human discernment remains indispensable.
+
+\begin{thebibliography}{5}
+\bibitem{garay2019}
+Garay, L.: \#Visitspain. Breaking down affective and cognitive attributes in the social media construction of the tourist destination image. Tour. Manag. Perspect. \textbf{32}, 100560 (2019)
+
+\bibitem{gartner1994}
+Gartner, W.C.: Image formation process. J. Travel Tour. Mark. \textbf{2}(2--3), 191--216 (1994)
+
+\bibitem{krippendorff2018}
+Krippendorff, K.: Content Analysis: An Introduction to Its Methodology, 4th edn. Sage, Thousand Oaks (2018)
+
+\bibitem{sun2021}
+Sun, W., Tang, S., Liu, F.: Examining perceived and projected destination image: A social media content analysis. Sustainability \textbf{13}(6), 3354 (2021)
+
+\bibitem{tasci2007}
+Tasci, A.D.A., Gartner, W.C., Cavusgil, S.T.: Conceptualization and operationalization of destination image. J. Hosp. Tour. Res. \textbf{31}(2), 194--223 (2007)
+\end{thebibliography}
+
+\end{document}
